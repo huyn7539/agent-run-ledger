@@ -1,0 +1,54 @@
+{
+  "trace": {
+    "trace_id": "trace_0123456789abcdef0123456789abcdef",
+    "workflow_name": "recorded-openai-agent",
+    "started_at": "2026-05-28T15:00:00Z",
+    "ended_at": "2026-05-28T15:00:12Z",
+    "metadata": {
+      "group_id": "fixture"
+    }
+  },
+  "spans": [
+    {
+      "span_id": "span_agent_1",
+      "trace_id": "trace_0123456789abcdef0123456789abcdef",
+      "started_at": "2026-05-28T15:00:00Z",
+      "ended_at": "2026-05-28T15:00:02Z",
+      "span_data": {
+        "type": "agent",
+        "name": "Support Agent"
+      }
+    },
+    {
+      "span_id": "span_generation_1",
+      "trace_id": "trace_0123456789abcdef0123456789abcdef",
+      "started_at": "2026-05-28T15:00:02Z",
+      "ended_at": "2026-05-28T15:00:05Z",
+      "span_data": {
+        "type": "generation",
+        "model": "gpt-4.1-mini",
+        "usage": {
+          "input_tokens": 125,
+          "output_tokens": 50
+        }
+      }
+    },
+    {
+      "span_id": "span_custom_retry_1",
+      "trace_id": "trace_0123456789abcdef0123456789abcdef",
+      "started_at": "2026-05-28T15:00:05Z",
+      "ended_at": "2026-05-28T15:00:12Z",
+      "span_data": {
+        "type": "custom",
+        "name": "crm.lookup_customer",
+        "data": {
+          "arl_step_type": "tool",
+          "retry_count": 3,
+          "cost_usd": 0.04,
+          "error": "TimeoutError: CRM lookup exceeded 5s timeout",
+          "tool_name": "crm.lookup_customer"
+        }
+      }
+    }
+  ]
+}

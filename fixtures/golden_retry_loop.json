@@ -1,0 +1,60 @@
+{
+  "schema_version": "0.1",
+  "run": {
+    "id": "run_retry_loop",
+    "workflow": "support-agent-demo",
+    "framework": "synthetic",
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "started_at": "2026-05-28T14:00:00Z",
+    "ended_at": "2026-05-28T14:00:42Z",
+    "success_label": "failed",
+    "prompt_hash": "prompt_retry_loop_v1",
+    "config_hash": "config_retry_5",
+    "total_cost_usd": 0.1842,
+    "total_latency_ms": 42000,
+    "total_input_tokens": 4200,
+    "total_output_tokens": 1900
+  },
+  "steps": [
+    {
+      "id": "step_1",
+      "type": "model",
+      "name": "plan",
+      "started_at": "2026-05-28T14:00:00Z",
+      "ended_at": "2026-05-28T14:00:08Z",
+      "token_usage": { "input": 2200, "output": 700 },
+      "cost_usd": 0.067,
+      "retry_count": 0,
+      "redaction_mode": "metadata_only"
+    },
+    {
+      "id": "step_2",
+      "type": "tool",
+      "name": "crm.lookup_customer",
+      "started_at": "2026-05-28T14:00:08Z",
+      "ended_at": "2026-05-28T14:00:34Z",
+      "token_usage": { "input": 1400, "output": 800 },
+      "cost_usd": 0.092,
+      "retry_count": 4,
+      "error": "TimeoutError: CRM lookup exceeded 5s timeout",
+      "redaction_mode": "metadata_only",
+      "metadata": {
+        "tool_name": "crm.lookup_customer",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "id": "step_3",
+      "type": "model",
+      "name": "finalize_failure",
+      "started_at": "2026-05-28T14:00:34Z",
+      "ended_at": "2026-05-28T14:00:42Z",
+      "token_usage": { "input": 600, "output": 400 },
+      "cost_usd": 0.0252,
+      "retry_count": 0,
+      "redaction_mode": "metadata_only"
+    }
+  ]
+}
+

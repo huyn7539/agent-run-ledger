@@ -1,0 +1,55 @@
+{
+  "schema_version": "0.1",
+  "run": {
+    "id": "run_clean",
+    "workflow": "support-agent-demo",
+    "framework": "synthetic",
+    "provider": "openai",
+    "model": "gpt-4.1-mini",
+    "started_at": "2026-05-28T15:00:00Z",
+    "ended_at": "2026-05-28T15:00:18Z",
+    "success_label": "passed",
+    "prompt_hash": "prompt_retry_loop_v1",
+    "config_hash": "config_retry_1",
+    "total_cost_usd": 0.071,
+    "total_latency_ms": 18000,
+    "total_input_tokens": 2600,
+    "total_output_tokens": 900
+  },
+  "steps": [
+    {
+      "id": "step_1",
+      "type": "model",
+      "name": "plan",
+      "started_at": "2026-05-28T15:00:00Z",
+      "ended_at": "2026-05-28T15:00:06Z",
+      "token_usage": { "input": 1800, "output": 500 },
+      "cost_usd": 0.049,
+      "retry_count": 0,
+      "redaction_mode": "metadata_only"
+    },
+    {
+      "id": "step_2",
+      "type": "tool",
+      "name": "crm.lookup_customer",
+      "started_at": "2026-05-28T15:00:06Z",
+      "ended_at": "2026-05-28T15:00:12Z",
+      "token_usage": { "input": 300, "output": 100 },
+      "cost_usd": 0.009,
+      "retry_count": 0,
+      "redaction_mode": "metadata_only"
+    },
+    {
+      "id": "step_3",
+      "type": "model",
+      "name": "finalize_success",
+      "started_at": "2026-05-28T15:00:12Z",
+      "ended_at": "2026-05-28T15:00:18Z",
+      "token_usage": { "input": 500, "output": 300 },
+      "cost_usd": 0.013,
+      "retry_count": 0,
+      "redaction_mode": "metadata_only"
+    }
+  ]
+}
+
