@@ -51,6 +51,36 @@ def test_classify_error_none_is_none() -> None:
     assert classify_error(None) is None
 
 
+def test_imported_error_class_cannot_inject_content() -> None:
+    """Codex adversarial finding (2026-05-29): an explicit error_class on the
+    IMPORT path must NOT bypass classify_error — otherwise a caller injects raw
+    content into the bounded label, which then reaches every egress channel.
+    error_class must ALWAYS be a bounded label from the closed vocabulary."""
+    from agent_run_ledger.core.models import ERROR_CLASSES
+
+    s = StepRecord.from_dict(
+        {
+            "id": "s", "type": "tool", "name": "n",
+            "started_at": "2026-05-28T00:00:00Z", "ended_at": "2026-05-28T00:00:01Z",
+            "error_class": "LEAKED_PROMPT_secret_customer_data_12345",
+        },
+        "r",
+    )
+    # the injected content is NOT stored verbatim; it is bounded to the vocab
+    assert s.error_class in ERROR_CLASSES
+    assert "LEAKED_PROMPT" not in (s.error_class or "")
+    # a legitimate bounded label still round-trips
+    s2 = StepRecord.from_dict(
+        {
+            "id": "s2", "type": "tool", "name": "n",
+            "started_at": "2026-05-28T00:00:00Z", "ended_at": "2026-05-28T00:00:01Z",
+            "error_class": "Timeout",
+        },
+        "r",
+    )
+    assert s2.error_class == "Timeout"
+
+
 # --- error_class is a real StepRecord field, persisted ------------------------
 
 def test_step_error_class_field_and_roundtrip(tmp_path: Path) -> None:

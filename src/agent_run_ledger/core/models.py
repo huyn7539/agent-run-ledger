@@ -359,6 +359,13 @@ class StepRecord:
             "error",
             sanitize_error(self.error) if self.error is not None else None,
         )
+        # L8 hardening (Codex adversarial finding 2026-05-29): error_class is
+        # ALWAYS bounded to the closed vocabulary at the chokepoint, regardless of
+        # construction path. A caller (esp. the import path) cannot inject raw
+        # content as error_class — classify_error maps anything unrecognized to
+        # "Other". Idempotent over the vocabulary, so a stored label re-loads
+        # unchanged.
+        object.__setattr__(self, "error_class", classify_error(self.error_class))
         object.__setattr__(self, "metadata", sanitize_metadata(self.metadata))
 
     @classmethod
