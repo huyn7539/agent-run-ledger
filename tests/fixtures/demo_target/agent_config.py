@@ -1,3 +1,3 @@
 RETRY_BUDGETS = {
-    "crm.lookup_customer": 4,
+    "demo.flaky_tool": 4,
 }

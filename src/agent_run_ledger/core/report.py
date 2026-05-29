@@ -4,12 +4,16 @@ from html import escape
 from pathlib import Path
 
 from agent_run_ledger.core.compare import RunComparison
+from agent_run_ledger.core.cost import cost_on_read
 from agent_run_ledger.core.models import TraceBundle
 
 
 def render_report(bundle: TraceBundle) -> str:
     retry_total = sum(step.retry_count for step in bundle.steps)
     error_total = sum(1 for step in bundle.steps if step.error)
+    # L7/LR2: the displayed run cost is computed on read from the FACTS, never
+    # the cached total_cost_usd (which a price-table change can make stale).
+    run_cost = cost_on_read(bundle)
     step_rows = "\n".join(
         "<tr>"
         f"<td>{escape(step.id)}</td>"
@@ -43,7 +47,7 @@ def render_report(bundle: TraceBundle) -> str:
   <h1>Agent Run Ledger</h1>
   <p><strong>Run:</strong> {escape(bundle.run.id)} | <strong>Workflow:</strong> {escape(bundle.run.workflow)}</p>
   <div>
-    <span class="metric"><strong>Cost:</strong> ${bundle.run.total_cost_usd:.6f}</span>
+    <span class="metric"><strong>Cost:</strong> ${run_cost:.6f}</span>
     <span class="metric"><strong>Latency:</strong> {bundle.run.total_latency_ms} ms</span>
     <span class="metric"><strong>Tokens:</strong> {bundle.run.total_input_tokens + bundle.run.total_output_tokens}</span>
     <span class="metric"><strong>Retries:</strong> {retry_total}</span>
