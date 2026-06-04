@@ -101,6 +101,16 @@ def test_trace_fields_are_treated_as_inert_strings(tmp_path: Path) -> None:
     assert bundle.steps[0].id == "../../etc/passwd"
 
 
+def test_non_utf8_trace_errors_safely(tmp_path: Path) -> None:
+    """A trace file with invalid UTF-8 must raise the typed TraceParseError, never
+    an uncaught UnicodeDecodeError (the 'always a typed, caught error' contract)."""
+    p = tmp_path / "trace.json"
+    p.write_bytes(b'{"run": "\xff\xfe not utf-8"}')
+
+    with pytest.raises(TraceParseError):
+        load_trace(p)
+
+
 def test_valid_trace_still_loads(tmp_path: Path) -> None:
     """The hardening must not break the happy path."""
     good = {

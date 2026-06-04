@@ -193,6 +193,13 @@ def _limits(proof_level: str, model_supplied: bool) -> list[str]:
         # Constraint 5: regression-to-the-mean disclosure.
         "Before/after deltas are uncorrected for regression to the mean — ARL "
         "fires on the worst runs, which partly improve on their own.",
+        # fleet HIGH: retry cost accrues on the repeated MODEL/response turns, not
+        # the collapsed tool span — so the per-loop wasted-cost estimate is often
+        # not attributable from the tool span alone. The L2 grade is STRUCTURAL
+        # (cost-independent); the cost figure is supporting, not the proof.
+        "Cost saving is not attributable from the tool span alone — retry waste "
+        "accrues on the repeated model/response turns; the L2 grade does not "
+        "depend on the cost figure.",
         # honest live-trace classification limit (verified against SDK source).
         "Live tool/response errors classify as 'Other': the SDK span error is "
         "free text, and bounded error-class precision needs app instrumentation.",
@@ -230,10 +237,18 @@ def _next_evidence(proof_level: str) -> list[str]:
 
 def _outcome_delta(expected_impact: dict[str, Any]) -> dict[str, Any]:
     """Carry the prescription's expected impact + a counter-metric guardrail
-    (Constraint 5), so a one-sided cost win is never shown without its guardrail."""
+    (Constraint 5), so a one-sided cost win is never shown without its guardrail.
+
+    Honesty (fleet HIGH): retry cost in an agentic loop accrues on the repeated
+    MODEL/response turns, not the tool spans the detector collapses — so the
+    tool-derived wasted-cost is ~0. We must NOT present a confident precise
+    ``-0.0`` (it reads as 'this fix saves nothing'). When the estimate rounds to
+    ~0, replace the number with the honest label 'not attributable' and disclose
+    the attribution gap in the receipt's limits."""
     delta = dict(expected_impact)
-    # The guardrail: capping retries must not silently drop success. The receipt
-    # makes the trade-off explicit rather than only advertising the cost saving.
+    cost = delta.get("estimated_cost_delta_usd")
+    if isinstance(cost, (int, float)) and round(cost, 6) == 0.0:
+        delta["estimated_cost_delta_usd"] = "not attributable"
     delta.setdefault(
         "guardrail_success_rate",
         "must not decrease — verify the shipped regression test before applying; "

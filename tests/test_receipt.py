@@ -123,9 +123,28 @@ def test_outcome_delta_carries_a_counter_metric() -> None:
     _, receipts = _receipts_for(_loop_trace(patch_target=_PATCH_TARGET))
     impact = receipts[0].outcome_delta
 
-    assert "estimated_cost_delta_usd" in impact
     # a guardrail/counter-metric must be present (e.g. success/latency guardrail)
     assert any("guardrail" in k or "counter" in k for k in impact)
+
+
+def test_no_false_precise_zero_cost_delta(tmp_path) -> None:
+    """HIGH (code+arch): retry cost in an agentic loop accrues on the MODEL/response
+    turns, not the tool spans — so the tool-span-derived wasted-cost is ~0. The
+    receipt must NOT present a confident precise '-0.0' that reads as 'this fix
+    saves nothing'. When wasted cost can't be attributed, the figure is omitted/
+    flagged unknown and the limits disclose the attribution gap — never a false 0."""
+    _, receipts = _receipts_for(_loop_trace(patch_target=_PATCH_TARGET))
+    r = receipts[0]
+    impact = r.outcome_delta
+
+    # no misleading precise -0.0 / 0.0 cost-saving claim
+    cost = impact.get("estimated_cost_delta_usd")
+    assert cost in (None, "not attributable") or (isinstance(cost, (int, float)) and cost < 0), (
+        f"misleading cost delta: {cost!r}"
+    )
+    # the attribution gap is disclosed honestly in limits
+    limits_text = " ".join(r.limits).lower()
+    assert "cost" in limits_text and ("model" in limits_text or "response" in limits_text or "attribut" in limits_text)
 
 
 def test_limits_disclose_regression_to_the_mean() -> None:

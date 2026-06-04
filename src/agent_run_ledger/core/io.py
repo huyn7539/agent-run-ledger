@@ -59,7 +59,10 @@ def load_trace(path: Path) -> TraceBundle:
         raise TraceParseError(
             f"trace file is too large: {size} bytes > {MAX_TRACE_BYTES}"
         )
-    text = path.read_text(encoding="utf-8")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise TraceParseError(f"trace file is not valid UTF-8: {exc}") from exc
     _check_depth(text)
     try:
         data = json.loads(text)
