@@ -132,20 +132,27 @@ def _grade_retry_cap(patch_type: str, patch: str, observed_retry_count: int | No
     return "L0"
 
 
-# The observed additional-attempt count, as the prescription records it in evidence
-# ("retry_count=<N> additional attempts"). The receipt grades sufficiency against
-# this fact; if it is absent, grading fails closed (no L2).
-_OBSERVED_RETRY_RE = re.compile(r"retry_count\s*=\s*(\d+)\b")
+# The observed additional-attempt count, as the prescription records it in evidence:
+# the FULL literal "retry_count=<N> additional attempts" (prescriptions.py). Anchor
+# on the whole phrase (not a bare "retry_count=" substring) so a stale/foreign
+# retry_count token elsewhere in evidence cannot be mistaken for the observed count
+# (fleet code-reviewer B2-L1). The receipt grades sufficiency against this fact; if
+# it is absent OR conflicting, grading fails closed (no L2).
+_OBSERVED_RETRY_RE = re.compile(r"\bretry_count\s*=\s*(\d+)\s+additional\s+attempts\b")
 
 
 def _observed_retry_count(evidence: list[str]) -> int | None:
     """Recover the observed additional-attempt count from a prescription's evidence,
-    or None if it is not present (sufficiency then unverifiable -> fail closed)."""
-    for line in evidence:
-        m = _OBSERVED_RETRY_RE.search(line)
-        if m is not None:
-            return int(m.group(1))
-    return None
+    or None if it is absent OR ambiguous (sufficiency then unverifiable -> fail
+    closed). Matching only the full ``retry_count=<N> additional attempts`` literal
+    rejects a stale/foreign ``retry_count=`` token; if two DISTINCT counts appear
+    (a poisoned/inconsistent prescription), we refuse rather than pick one."""
+    values = {
+        int(m.group(1))
+        for line in evidence
+        if (m := _OBSERVED_RETRY_RE.search(line)) is not None
+    }
+    return next(iter(values)) if len(values) == 1 else None
 
 
 def _new_cap_value(patch: str) -> int | None:

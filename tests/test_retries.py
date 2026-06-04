@@ -176,6 +176,17 @@ def test_non_function_spans_never_collapse() -> None:
 # --- B3 / NEW-4: same-turn fan-out must NOT false-collapse ---------------------
 
 
+def test_turn_id_is_transient_not_a_stored_step_column() -> None:
+    """SECURITY/defense-in-depth (fleet security-auditor): turn_id lives ONLY on the
+    transient AttemptFacts for grouping — it must NEVER become a stored StepRecord
+    column, or it would enter the egress matrix unreviewed. This guard fails if a
+    future change starts persisting it."""
+    from agent_run_ledger.core.models import StepRecord
+
+    assert "turn_id" not in StepRecord.__dataclass_fields__
+    assert "turn_id" not in StepRecord(id="s", run_id="r", step_type="function", name="n", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:01Z").to_dict()
+
+
 def test_same_turn_fanout_with_one_error_does_not_collapse() -> None:
     """B3 NEGATIVE (grouper): 3 sequential same-tool/same-input calls in ONE turn
     (shared turn_id), first errors, rest succeed. This is a same-turn fan-out, NOT

@@ -115,6 +115,32 @@ def test_cap_equal_to_observed_count_does_not_earn_l2() -> None:
     assert receipts[0].proof_level != "L2"
 
 
+def test_stale_or_conflicting_retry_count_token_does_not_grade_false_l2() -> None:
+    """B2-L1 (fleet code-reviewer): the observed-count recovery must not be fooled
+    by a STALE/extra ``retry_count=`` token earlier in evidence. A stored/imported
+    prescription whose evidence carries a high stale ``retry_count=99`` token ahead
+    of the real ``retry_count=2 additional attempts`` line must NOT let an
+    insufficient cap (->5) grade L2. The recognizer anchors on the full evidence
+    literal and rejects on conflicting distinct values -> fail closed to L1."""
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=5)
+    rx = bundle.prescriptions[0]
+    poisoned = PrescriptionRecord(
+        id=rx.id, run_id=rx.run_id, severity=rx.severity, root_cause=rx.root_cause,
+        one_line_fix=rx.one_line_fix,
+        # a stale/foreign retry_count token ahead of the genuine evidence line
+        evidence=["note retry_count=99 (stale)", *rx.evidence],
+        patch_type=rx.patch_type, patch=rx.patch, expected_impact=rx.expected_impact,
+        regression_test_template=rx.regression_test_template,
+    )
+    bundle = bundle.with_prescriptions([poisoned])
+    receipts = build_receipts(bundle)
+    assert receipts[0].proof_level != "L2", (
+        "a stale retry_count=99 token must not let a cap of 5 grade L2 over a real "
+        "2-retry loop"
+    )
+    assert receipts[0].proof_level == "L1"
+
+
 def test_unrecoverable_observed_count_fails_closed_to_l1() -> None:
     """FAIL CLOSED: if the observed retry count cannot be recovered from evidence,
     sufficiency is unverifiable -> never grant L2. The diff is a valid decrease but
