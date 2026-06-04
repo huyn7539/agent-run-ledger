@@ -143,6 +143,61 @@ def test_stale_or_conflicting_retry_count_token_does_not_grade_false_l2() -> Non
     assert receipts[0].proof_level == "L1"
 
 
+def test_stale_full_phrase_in_a_larger_evidence_string_does_not_supply_a_count() -> None:
+    """Codex re-review P1: the observed-count recovery must match only the EXACT
+    ARL-authored evidence line ("retry_count=<N> additional attempts"), not the
+    phrase embedded in a larger free-text note. A stored/imported prescription whose
+    ONLY matching line is `"stale note from old run: retry_count=99 additional
+    attempts"` (with NO genuine ARL evidence line) supplies no observed count ->
+    sufficiency is unrecoverable -> fail closed to L1, even though the cap (->5)
+    lowers from 10."""
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=5)
+    rx = bundle.prescriptions[0]
+    poisoned = PrescriptionRecord(
+        id=rx.id, run_id=rx.run_id, severity=rx.severity, root_cause=rx.root_cause,
+        one_line_fix=rx.one_line_fix,
+        # NO genuine ARL evidence line; only a free-text note that embeds the phrase
+        evidence=["stale note from old run: retry_count=99 additional attempts"],
+        patch_type=rx.patch_type, patch=rx.patch, expected_impact=rx.expected_impact,
+        regression_test_template=rx.regression_test_template,
+    )
+    bundle = bundle.with_prescriptions([poisoned])
+    receipts = build_receipts(bundle)
+    assert receipts[0].proof_level == "L1", (
+        "a stale full phrase inside a free-text note must not supply the observed "
+        "count; with no genuine ARL evidence line, sufficiency is unrecoverable -> L1"
+    )
+
+
+def test_comment_only_budget_diff_is_not_graded_l2() -> None:
+    """Codex re-review P2: a diff that only changes a COMMENTED-OUT budget line does
+    not mechanically remove the failure path — the live assignment is untouched. The
+    syntax gate must reject a budget line whose identifier is behind a comment
+    marker, so build_receipts cannot bless a comment-only artifact as L2."""
+    comment_only = (
+        "diff --git a/agent/tools/crm.py b/agent/tools/crm.py\n"
+        "--- a/agent/tools/crm.py\n"
+        "+++ b/agent/tools/crm.py\n"
+        "@@ -1 +1 @@\n"
+        "-# CRM_LOOKUP_MAX_RETRIES = 10\n"
+        "+# CRM_LOOKUP_MAX_RETRIES = 0\n"
+    )
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=0)
+    rx = bundle.prescriptions[0]
+    commented = PrescriptionRecord(
+        id=rx.id, run_id=rx.run_id, severity=rx.severity, root_cause=rx.root_cause,
+        one_line_fix=rx.one_line_fix, evidence=rx.evidence,
+        patch_type="unified_diff", patch=comment_only,
+        expected_impact=rx.expected_impact, regression_test_template=rx.regression_test_template,
+    )
+    bundle = bundle.with_prescriptions([commented])
+    receipts = build_receipts(bundle)
+    assert receipts[0].proof_level != "L2", (
+        "a comment-only budget change does not remove the live failure path; "
+        "grading it L2 overclaims mechanical removal"
+    )
+
+
 def test_unrecoverable_observed_count_fails_closed_to_l1() -> None:
     """FAIL CLOSED: if the observed retry count cannot be recovered from evidence,
     sufficiency is unverifiable -> never grant L2. The diff is a valid decrease but

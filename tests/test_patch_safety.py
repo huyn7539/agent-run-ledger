@@ -143,6 +143,20 @@ def test_unrelated_diff_with_retr_in_path_is_not_graded_l2() -> None:
     assert _is_retry_cap_diff(unrelated) is False
 
 
+def test_comment_only_budget_diff_is_rejected_by_grader() -> None:
+    """Codex re-review P2: a budget line behind a comment marker is not a live
+    assignment — changing it removes nothing. The recognizer must reject it."""
+    comment_only = (
+        "diff --git a/agent/tools/crm.py b/agent/tools/crm.py\n"
+        "--- a/agent/tools/crm.py\n"
+        "+++ b/agent/tools/crm.py\n"
+        "@@ -1 +1 @@\n"
+        "-# CRM_LOOKUP_MAX_RETRIES = 10\n"
+        "+# CRM_LOOKUP_MAX_RETRIES = 0\n"
+    )
+    assert _is_retry_cap_diff(comment_only) is False
+
+
 def test_genuine_retry_cap_diff_passes_grader() -> None:
     good = (
         "diff --git a/agent/tools/crm.py b/agent/tools/crm.py\n"

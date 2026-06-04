@@ -133,24 +133,25 @@ def _grade_retry_cap(patch_type: str, patch: str, observed_retry_count: int | No
 
 
 # The observed additional-attempt count, as the prescription records it in evidence:
-# the FULL literal "retry_count=<N> additional attempts" (prescriptions.py). Anchor
-# on the whole phrase (not a bare "retry_count=" substring) so a stale/foreign
-# retry_count token elsewhere in evidence cannot be mistaken for the observed count
-# (fleet code-reviewer B2-L1). The receipt grades sufficiency against this fact; if
-# it is absent OR conflicting, grading fails closed (no L2).
-_OBSERVED_RETRY_RE = re.compile(r"\bretry_count\s*=\s*(\d+)\s+additional\s+attempts\b")
+# the EXACT ARL-authored line "retry_count=<N> additional attempts" (prescriptions.py).
+# We FULLMATCH the whole (stripped) line — not a substring/search — so the phrase
+# embedded in a larger free-text note (e.g. "stale note: retry_count=99 additional
+# attempts") cannot supply a forged observed count (Codex re-review P1; fleet B2-L1).
+# If it is absent OR two DISTINCT counts appear, grading fails closed (no L2).
+_OBSERVED_RETRY_RE = re.compile(r"retry_count=(\d+) additional attempts")
 
 
 def _observed_retry_count(evidence: list[str]) -> int | None:
     """Recover the observed additional-attempt count from a prescription's evidence,
     or None if it is absent OR ambiguous (sufficiency then unverifiable -> fail
-    closed). Matching only the full ``retry_count=<N> additional attempts`` literal
-    rejects a stale/foreign ``retry_count=`` token; if two DISTINCT counts appear
-    (a poisoned/inconsistent prescription), we refuse rather than pick one."""
+    closed). Only the EXACT ARL-authored line counts (fullmatch on the stripped
+    line), so a stale/foreign phrase inside a larger note is ignored; if two DISTINCT
+    counts appear (a poisoned/inconsistent prescription), we refuse rather than pick
+    one."""
     values = {
         int(m.group(1))
         for line in evidence
-        if (m := _OBSERVED_RETRY_RE.search(line)) is not None
+        if (m := _OBSERVED_RETRY_RE.fullmatch(line.strip())) is not None
     }
     return next(iter(values)) if len(values) == 1 else None
 
@@ -203,14 +204,22 @@ _RETRY_BUDGET_LINE = re.compile(
     re.IGNORECASE,
 )
 
+# Leading comment markers: a budget assignment behind one of these is COMMENTED OUT,
+# so changing it removes nothing from the live code path (Codex re-review P2). We
+# reject a line whose first non-blank characters begin a comment.
+_COMMENT_PREFIX = re.compile(r"^\s*(#|//|--|;)")
+
 
 def _retry_budget_value(content_lines: list[str]) -> int | None:
-    """Return the integer retry budget asserted by exactly one of *content_lines*,
-    or None if zero or more-than-one such line is present (ambiguous -> reject)."""
+    """Return the integer retry budget asserted by exactly one LIVE assignment line in
+    *content_lines*, or None if zero or more-than-one such line is present (ambiguous
+    -> reject). A commented-out budget line is NOT a live assignment — changing it
+    removes nothing — so lines beginning with a comment marker are skipped."""
     values = [
         int(m.group(3))
         for line in content_lines
-        if (m := _RETRY_BUDGET_LINE.search(line)) is not None
+        if _COMMENT_PREFIX.match(line) is None
+        and (m := _RETRY_BUDGET_LINE.search(line)) is not None
     ]
     return values[0] if len(values) == 1 else None
 
