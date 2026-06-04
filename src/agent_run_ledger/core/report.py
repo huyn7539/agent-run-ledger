@@ -6,11 +6,17 @@ from pathlib import Path
 from agent_run_ledger.core.compare import RunComparison
 from agent_run_ledger.core.cost import cost_on_read
 from agent_run_ledger.core.models import TraceBundle
+from agent_run_ledger.core.prescriptions import derive_retry_steps
 
 
 def render_report(bundle: TraceBundle) -> str:
-    retry_total = sum(step.retry_count for step in bundle.steps)
-    error_total = sum(1 for step in bundle.steps if step.error)
+    # Read the DERIVED retry view (collapse-on-read), the SAME view the detector
+    # uses — so the Retries metric + step rows agree with the prescription cards.
+    # Reading raw bundle.steps would show retry_count=0 per attempt while a
+    # prescription cites retry_count=N (a self-contradicting artifact).
+    steps = derive_retry_steps(bundle)
+    retry_total = sum(step.retry_count for step in steps)
+    error_total = sum(1 for step in steps if step.error)
     # L7/LR2: the displayed run cost is computed on read from the FACTS, never
     # the cached total_cost_usd (which a price-table change can make stale).
     run_cost = cost_on_read(bundle)
@@ -24,7 +30,7 @@ def render_report(bundle: TraceBundle) -> str:
         f"<td>{step.retry_count}</td>"
         f"<td>{escape(step.error or '')}</td>"
         "</tr>"
-        for step in bundle.steps
+        for step in steps
     )
     prescription_html = _render_prescriptions(bundle)
     return f"""<!doctype html>
