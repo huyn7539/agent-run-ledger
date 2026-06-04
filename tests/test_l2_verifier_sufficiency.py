@@ -1,0 +1,134 @@
+"""B2 — the L2 verifier must EARN the grade: a lowered-but-INSUFFICIENT retry cap
+must NOT grade L2.
+
+The substring/decrease bug is already fixed (test_patch_safety.py): the grader
+requires a real numeric DECREASE on a retry-budget line. But a DECREASE that is
+still ABOVE the observed retry count does not mechanically remove the observed
+failure path. Observed ``retry_count=2`` is a 3-attempt loop; a cap of 5 (even
+lowered from 10) still permits that exact loop, yet the L2 claim says the repair
+"statically removes the unbounded-retry failure path."
+
+The honest GENERATED pipeline always uses ``allowed_retries=0`` so it is safe — the
+gap is the VERIFIER boundary: a stored/imported prescription whose diff lowers but
+does not prevent the observed loop. ``build_receipts`` must compare the new cap
+against the observed retry count (recovered from ``rx.evidence``) and require
+``new_budget <= observed_retry_count`` to be FALSE — i.e. the cap must drop the loop
+below the observed attempt count. If the observed count cannot be recovered,
+grading FAILS CLOSED to L1 (never grant L2 when sufficiency is unverifiable).
+"""
+
+from __future__ import annotations
+
+from agent_run_ledger.core.models import PrescriptionRecord, RunRecord, StepRecord, TraceBundle
+from agent_run_ledger.core.receipt import build_receipts
+
+
+def _unified_cap_diff(before_val: int, after_val: int) -> str:
+    return (
+        "diff --git a/agent/tools/crm.py b/agent/tools/crm.py\n"
+        "--- a/agent/tools/crm.py\n"
+        "+++ b/agent/tools/crm.py\n"
+        "@@ -1 +1 @@\n"
+        f"-CRM_LOOKUP_MAX_RETRIES = {before_val}\n"
+        f"+CRM_LOOKUP_MAX_RETRIES = {after_val}\n"
+    )
+
+
+def _bundle_with_prescription(*, observed_retry_count: int, before_val: int, after_val: int) -> TraceBundle:
+    """A bundle carrying ONE retry-cap prescription whose evidence cites
+    *observed_retry_count* and whose unified diff lowers the cap from *before_val*
+    to *after_val*. Models a stored/imported prescription hitting the verifier."""
+    run = RunRecord(
+        id="run_verifier_boundary",
+        workflow="retry-loop-agent",
+        framework="openai-agents-python",
+        provider="openai",
+        model="gpt-4o-mini",
+        started_at="2026-05-31T10:00:00Z",
+        ended_at="2026-05-31T10:00:10Z",
+        success_label="failed",
+        total_cost_usd=0.03,
+    )
+    step = StepRecord(
+        id="fn_attempt1",
+        run_id=run.id,
+        step_type="function",
+        name="crm.lookup",
+        started_at="2026-05-31T10:00:00Z",
+        ended_at="2026-05-31T10:00:06Z",
+        span_kind="function",
+        retry_count=observed_retry_count,
+        cost_usd=0.03,
+        error="Error running tool",
+        error_class="Other",
+    )
+    rx = PrescriptionRecord(
+        id="rx_imported_0001",
+        run_id=run.id,
+        severity="high",
+        root_cause=f"crm.lookup made {observed_retry_count} additional attempts after the first",
+        one_line_fix="Set crm.lookup retry budget and fail closed.",
+        evidence=[
+            "step_id=fn_attempt1",
+            f"retry_count={observed_retry_count} additional attempts",
+            f"total_attempts={observed_retry_count + 1}",
+            "step_cost_usd=0.030000",
+            "step_error_class=Other",
+        ],
+        patch_type="unified_diff",
+        patch=_unified_cap_diff(before_val, after_val),
+        expected_impact={"estimated_cost_delta_usd": -0.02},
+        regression_test_template="def test_crm_lookup_retry_budget():\n    assert True\n",
+    )
+    return TraceBundle(run=run, steps=[step], prescriptions=[rx])
+
+
+def test_lowered_but_insufficient_cap_is_not_graded_l2() -> None:
+    """RED-FIRST (B2): observed retry_count=2 (3-attempt loop); the diff lowers the
+    cap 10 -> 5, but 5 still permits the observed loop. This must NOT grade L2 — the
+    repair does not mechanically remove the observed failure path."""
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=5)
+    receipts = build_receipts(bundle)
+    assert len(receipts) == 1
+    assert receipts[0].proof_level != "L2", (
+        "a cap of 5 does not prevent an observed retry_count=2 (3-attempt) loop; "
+        "grading it L2 overclaims 'statically removes the failure path'"
+    )
+    assert receipts[0].proof_level == "L1"
+
+
+def test_sufficient_cap_at_or_below_observed_count_is_graded_l2() -> None:
+    """The strong honest path: capping to 0 (<= the observed 2) DOES prevent the
+    observed loop -> L2 is earned."""
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=0)
+    receipts = build_receipts(bundle)
+    assert len(receipts) == 1
+    assert receipts[0].proof_level == "L2"
+
+
+def test_cap_equal_to_observed_count_does_not_earn_l2() -> None:
+    """Boundary: a cap EQUAL to the observed retry_count still permits exactly the
+    observed loop (retry_count is additional attempts; new_budget must be strictly
+    LESS to drop below it). Cap 2 with observed 2 -> NOT L2."""
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=5, after_val=2)
+    receipts = build_receipts(bundle)
+    assert receipts[0].proof_level != "L2"
+
+
+def test_unrecoverable_observed_count_fails_closed_to_l1() -> None:
+    """FAIL CLOSED: if the observed retry count cannot be recovered from evidence,
+    sufficiency is unverifiable -> never grant L2. The diff is a valid decrease but
+    the grader has no observed count to check it against."""
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=0)
+    # strip the retry_count evidence line so the observed count is unrecoverable
+    rx = bundle.prescriptions[0]
+    stripped = PrescriptionRecord(
+        id=rx.id, run_id=rx.run_id, severity=rx.severity, root_cause="crm.lookup looped",
+        one_line_fix=rx.one_line_fix,
+        evidence=["step_id=fn_attempt1", "step_error_class=Other"],
+        patch_type=rx.patch_type, patch=rx.patch, expected_impact=rx.expected_impact,
+        regression_test_template=rx.regression_test_template,
+    )
+    bundle = bundle.with_prescriptions([stripped])
+    receipts = build_receipts(bundle)
+    assert receipts[0].proof_level == "L1", "unverifiable sufficiency must fail closed to L1"

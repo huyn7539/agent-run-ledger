@@ -27,7 +27,7 @@ from agent_run_ledger.core.receipt import PROOF_LEVELS, build_receipts
 # --- a derived real retry loop (function spans) -> L2 with an applyable diff ---
 
 
-def _function_span(span_id, *, tool_input, started_at, ended_at, patch_target=None):
+def _function_span(span_id, *, tool_input, started_at, ended_at, patch_target=None, parent_id="agent_root"):
     data = {}
     if patch_target is not None:
         data["retry_budget_patch_target"] = patch_target
@@ -38,11 +38,21 @@ def _function_span(span_id, *, tool_input, started_at, ended_at, patch_target=No
         "object": "trace.span",
         "id": span_id,
         "trace_id": "trace_receipt_0123456789",
-        "parent_id": "agent_root",
+        "parent_id": parent_id,
         "started_at": started_at,
         "ended_at": ended_at,
         "span_data": span_data,
         "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "details redacted"}},
+    }
+
+
+def _turn_span(turn_id, *, started_at, ended_at):
+    """A per-turn turn span (parent=agent). The REAL SDK opens a fresh one each turn;
+    cross-turn tool retries parent to DIFFERENT turns but share the agent scope (B3)."""
+    return {
+        "object": "trace.span", "id": turn_id, "trace_id": "trace_receipt_0123456789",
+        "parent_id": "agent_root", "started_at": started_at, "ended_at": ended_at,
+        "span_data": {"type": "custom", "name": turn_id}, "error": None,
     }
 
 
@@ -64,9 +74,13 @@ def _loop_trace(patch_target=None):
         "spans": [
             # the stable agent ancestor that scopes the retried tool spans
             {"object": "trace.span", "id": "agent_root", "trace_id": "trace_receipt_0123456789", "parent_id": None, "started_at": "2026-05-31T10:00:00Z", "ended_at": "2026-05-31T10:00:10Z", "span_data": {"type": "agent", "name": "Support Agent"}, "error": None},
-            _function_span("s1", tool_input="lookup 42", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", patch_target=patch_target),
-            _function_span("s2", tool_input="lookup 42", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", patch_target=patch_target),
-            _function_span("s3", tool_input="lookup 42", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", patch_target=patch_target),
+            # REAL SHAPE (B3): each retry is a new turn -> distinct turn parent per attempt.
+            _turn_span("turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z"),
+            _function_span("s1", tool_input="lookup 42", parent_id="turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", patch_target=patch_target),
+            _turn_span("turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z"),
+            _function_span("s2", tool_input="lookup 42", parent_id="turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", patch_target=patch_target),
+            _turn_span("turn_3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z"),
+            _function_span("s3", tool_input="lookup 42", parent_id="turn_3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", patch_target=patch_target),
         ],
     }
 

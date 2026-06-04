@@ -1,0 +1,219 @@
+{
+  "_comment": "HAND-INSTRUMENTED L2 ILLUSTRATION fixture \u2014 NOT a real captured run. This is the SAME real cross-turn retry-loop topology a live SDK run produces (verified against the installed SDK), but each crm.lookup function span ADDITIONALLY carries span_data.data.retry_budget_patch_target, which the native SDK FunctionSpanData.export() does NOT emit. An app that instruments its tools can attach this safe patch target; with it, ARL generates an applyable templated retry-cap diff and the receipt honestly reaches L2 (static repair proof). A PLAIN captured run (see tests/test_live_capture_receipt.py) carries no patch target and honestly grades L1. This fixture exists to ILLUSTRATE the L2 path for the demo; it must NEVER be presented as the real-run gate.",
+  "trace": {
+    "trace_id": "trace_instrumented_l2_demo_0001",
+    "workflow_name": "support-agent-instrumented",
+    "started_at": "2026-05-31T10:00:00Z",
+    "ended_at": "2026-05-31T10:00:12Z"
+  },
+  "spans": [
+    {
+      "object": "trace.span",
+      "id": "agent_support",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": null,
+      "started_at": "2026-05-31T10:00:00Z",
+      "ended_at": "2026-05-31T10:00:12Z",
+      "span_data": {
+        "type": "agent",
+        "name": "Support Agent"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "turn_1",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "agent_support",
+      "started_at": "2026-05-31T10:00:00Z",
+      "ended_at": "2026-05-31T10:00:04Z",
+      "span_data": {
+        "type": "custom",
+        "name": "turn_1"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "resp_turn1",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "turn_1",
+      "started_at": "2026-05-31T10:00:00Z",
+      "ended_at": "2026-05-31T10:00:01Z",
+      "span_data": {
+        "type": "response",
+        "response_id": "resp_aaa1",
+        "usage": {
+          "requests": 1,
+          "input_tokens": 2200,
+          "output_tokens": 350,
+          "total_tokens": 2550,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "fn_attempt1",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "turn_1",
+      "started_at": "2026-05-31T10:00:01Z",
+      "ended_at": "2026-05-31T10:00:03Z",
+      "span_data": {
+        "type": "function",
+        "name": "crm.lookup",
+        "input": "{\"customer_id\": 42}",
+        "data": {
+          "retry_budget_patch_target": {
+            "path": "agent/tools/crm.py",
+            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
+            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
+          }
+        }
+      },
+      "error": {
+        "message": "Error running tool",
+        "data": {
+          "tool_name": "crm.lookup",
+          "error": "details redacted"
+        }
+      }
+    },
+    {
+      "object": "trace.span",
+      "id": "turn_2",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "agent_support",
+      "started_at": "2026-05-31T10:00:04Z",
+      "ended_at": "2026-05-31T10:00:08Z",
+      "span_data": {
+        "type": "custom",
+        "name": "turn_2"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "resp_turn2",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "turn_2",
+      "started_at": "2026-05-31T10:00:04Z",
+      "ended_at": "2026-05-31T10:00:05Z",
+      "span_data": {
+        "type": "response",
+        "response_id": "resp_aaa2",
+        "usage": {
+          "requests": 1,
+          "input_tokens": 2350,
+          "output_tokens": 360,
+          "total_tokens": 2710,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "fn_attempt2",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "turn_2",
+      "started_at": "2026-05-31T10:00:05Z",
+      "ended_at": "2026-05-31T10:00:07Z",
+      "span_data": {
+        "type": "function",
+        "name": "crm.lookup",
+        "input": "{\"customer_id\": 42}",
+        "data": {
+          "retry_budget_patch_target": {
+            "path": "agent/tools/crm.py",
+            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
+            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
+          }
+        }
+      },
+      "error": {
+        "message": "Error running tool",
+        "data": {
+          "tool_name": "crm.lookup",
+          "error": "details redacted"
+        }
+      }
+    },
+    {
+      "object": "trace.span",
+      "id": "turn_3",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "agent_support",
+      "started_at": "2026-05-31T10:00:08Z",
+      "ended_at": "2026-05-31T10:00:12Z",
+      "span_data": {
+        "type": "custom",
+        "name": "turn_3"
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "resp_turn3",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "turn_3",
+      "started_at": "2026-05-31T10:00:08Z",
+      "ended_at": "2026-05-31T10:00:09Z",
+      "span_data": {
+        "type": "response",
+        "response_id": "resp_aaa3",
+        "usage": {
+          "requests": 1,
+          "input_tokens": 2500,
+          "output_tokens": 370,
+          "total_tokens": 2870,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "fn_attempt3",
+      "trace_id": "trace_instrumented_l2_demo_0001",
+      "parent_id": "turn_3",
+      "started_at": "2026-05-31T10:00:09Z",
+      "ended_at": "2026-05-31T10:00:11Z",
+      "span_data": {
+        "type": "function",
+        "name": "crm.lookup",
+        "input": "{\"customer_id\": 42}",
+        "data": {
+          "retry_budget_patch_target": {
+            "path": "agent/tools/crm.py",
+            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
+            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
+          }
+        }
+      },
+      "error": {
+        "message": "Error running tool",
+        "data": {
+          "tool_name": "crm.lookup",
+          "error": "details redacted"
+        }
+      }
+    }
+  ]
+}

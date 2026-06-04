@@ -24,6 +24,10 @@ from agent_run_ledger.adapters.openai import bundle_from_recorded_trace
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.retries import AttemptFacts, collapse_retry_groups
 
+# Sentinel so the helper can tell "turn_id not passed" (default to a distinct id
+# per attempt) from "turn_id explicitly None" (model an uncaptured turn).
+_UNSET = object()
+
 
 def _attempt(
     index: int,
@@ -35,6 +39,7 @@ def _attempt(
     error_class: str | None = "Timeout",
     started_at: str | None = None,
     ended_at: str | None = None,
+    turn_id: str | None | object = _UNSET,
 ) -> AttemptFacts:
     base = index * 2
     return AttemptFacts(
@@ -42,6 +47,11 @@ def _attempt(
         name=name,
         span_kind="function",
         retry_scope=scope,
+        # B3: a real cross-turn retry has a DISTINCT immediate (turn) parent per
+        # attempt. Default each attempt to its own turn id so genuine-loop tests
+        # model the real shape; same-turn negatives pass a SHARED turn id, and an
+        # explicit None models "turn not captured" (abstain).
+        turn_id=(f"turn_{index}" if turn_id is _UNSET else turn_id),  # type: ignore[arg-type]
         started_at=started_at or f"2026-05-31T10:00:{base:02d}Z",
         ended_at=ended_at or f"2026-05-31T10:00:{base + 1:02d}Z",
         has_error=has_error,
@@ -57,6 +67,7 @@ def _model_attempt(index: int, *, scope: str = "agent_1", started_at: str, ended
         name=f"response_{index}",
         span_kind="response",
         retry_scope=scope,
+        turn_id=f"turn_{index}",
         started_at=started_at,
         ended_at=ended_at,
         has_error=False,
@@ -156,10 +167,50 @@ def test_missing_scope_does_not_collapse() -> None:
 
 def test_non_function_spans_never_collapse() -> None:
     attempts = [
-        AttemptFacts(0, "resp", "response", "agent_1", "2026-05-31T10:00:00Z", "2026-05-31T10:00:01Z", True, "Timeout", None),
-        AttemptFacts(1, "resp", "response", "agent_1", "2026-05-31T10:00:02Z", "2026-05-31T10:00:03Z", True, "Timeout", None),
+        AttemptFacts(0, "resp", "response", "agent_1", "2026-05-31T10:00:00Z", "2026-05-31T10:00:01Z", True, "Timeout", None, "turn_0"),
+        AttemptFacts(1, "resp", "response", "agent_1", "2026-05-31T10:00:02Z", "2026-05-31T10:00:03Z", True, "Timeout", None, "turn_1"),
     ]
     assert collapse_retry_groups(attempts) == [[0], [1]]
+
+
+# --- B3 / NEW-4: same-turn fan-out must NOT false-collapse ---------------------
+
+
+def test_same_turn_fanout_with_one_error_does_not_collapse() -> None:
+    """B3 NEGATIVE (grouper): 3 sequential same-tool/same-input calls in ONE turn
+    (shared turn_id), first errors, rest succeed. This is a same-turn fan-out, NOT
+    a retry loop — it must NOT collapse (zero groups of length>1). A real agentic
+    retry spans MULTIPLE turns; the >1-turn requirement is what rejects this."""
+    attempts = [
+        _attempt(0, turn_id="turn_1", has_error=True, error_class="Timeout"),
+        _attempt(1, turn_id="turn_1", has_error=False, error_class=None),
+        _attempt(2, turn_id="turn_1", has_error=False, error_class=None),
+    ]
+    assert collapse_retry_groups(attempts) == [[0], [1], [2]]
+
+
+def test_cross_turn_loop_still_collapses_after_turn_guard() -> None:
+    """B3 POSITIVE (grouper): the SAME 3 attempts but across THREE turns (distinct
+    turn_ids) is a genuine retry loop and MUST still collapse — the turn guard
+    rejects same-turn fan-out without breaking real cross-turn detection."""
+    attempts = [
+        _attempt(0, turn_id="turn_1"),
+        _attempt(1, turn_id="turn_2"),
+        _attempt(2, turn_id="turn_3"),
+    ]
+    assert collapse_retry_groups(attempts) == [[0, 1, 2]]
+
+
+def test_missing_turn_id_abstains_rather_than_false_collapse() -> None:
+    """Conservative: if turn ids were not captured (all None), the >1-turn check
+    cannot be satisfied -> abstain (do NOT collapse). A false negative on unknown
+    structure, never a false positive."""
+    attempts = [
+        _attempt(0, turn_id=None),
+        _attempt(1, turn_id=None),
+        _attempt(2, turn_id=None),
+    ]
+    assert collapse_retry_groups(attempts) == [[0], [1], [2]]
 
 
 # --- adapter + on-read end-to-end: real span shape -> derived retry_count ------
@@ -176,6 +227,18 @@ def _agent_span():
         "object": "trace.span", "id": "agent_root", "trace_id": "trace_retry_0123456789ab",
         "parent_id": None, "started_at": "2026-05-31T10:00:00Z", "ended_at": "2026-05-31T10:00:20Z",
         "span_data": {"type": "agent", "name": "Support Agent"}, "error": None,
+    }
+
+
+def _turn_span(turn_id, *, started_at, ended_at):
+    """A per-turn turn span (parent=agent). The REAL SDK opens a fresh one each
+    turn; cross-turn tool retries parent to DIFFERENT turn spans but share the
+    agent scope. (B3: this distinct-parent-per-turn shape is what separates a
+    genuine retry loop from a same-turn fan-out.)"""
+    return {
+        "object": "trace.span", "id": turn_id, "trace_id": "trace_retry_0123456789ab",
+        "parent_id": "agent_root", "started_at": started_at, "ended_at": ended_at,
+        "span_data": {"type": "custom", "name": turn_id}, "error": None,
     }
 
 
@@ -206,13 +269,20 @@ def _trace(spans):
 
 def test_adapter_derives_retry_loop_from_repeated_function_spans() -> None:
     """END-TO-END NEW-4: 3 repeated failing crm.lookup spans, SAME input, NO
-    app-supplied retry_count -> ARL DERIVES the loop on read -> 1 prescription."""
+    app-supplied retry_count -> ARL DERIVES the loop on read -> 1 prescription.
+
+    REAL SHAPE (B3): each attempt is a NEW turn, so the function spans parent to
+    DIFFERENT turn spans (verified against the installed SDK via a stub-Model run,
+    tests/test_live_capture_receipt.py) but share the agent scope."""
     same = "lookup customer 42"
     bundle = bundle_from_recorded_trace(
         _trace([
-            _function_span("s1", tool_input=same, started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
-            _function_span("s2", tool_input=same, started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", error=_TOOL_ERROR),
-            _function_span("s3", tool_input=same, started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", error=_TOOL_ERROR),
+            _turn_span("turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z"),
+            _function_span("s1", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
+            _turn_span("turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z"),
+            _function_span("s2", tool_input=same, parent_id="turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", error=_TOOL_ERROR),
+            _turn_span("turn_3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z"),
+            _function_span("s3", tool_input=same, parent_id="turn_3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", error=_TOOL_ERROR),
         ]),
         model="gpt-4o-mini",
     )
@@ -223,22 +293,45 @@ def test_adapter_derives_retry_loop_from_repeated_function_spans() -> None:
 
 def test_adapter_derives_retry_loop_from_real_interleaved_agentic_shape() -> None:
     """END-TO-END, REAL SHAPE: the agentic retry loop interleaves a response span
-    before each tool retry. ARL still derives 1 prescription on read."""
+    before each tool retry, and each retry is a NEW turn — so the function spans
+    parent to DIFFERENT turn spans (the cross-turn topology the live SDK emits).
+    ARL still derives 1 prescription on read."""
     same = "lookup customer 42"
     bundle = bundle_from_recorded_trace(
         _trace([
-            _response_span("r1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:01Z"),
-            _function_span("f1", tool_input=same, started_at="2026-05-31T10:00:01Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
-            _response_span("r2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:03Z"),
-            _function_span("f2", tool_input=same, started_at="2026-05-31T10:00:03Z", ended_at="2026-05-31T10:00:04Z", error=_TOOL_ERROR),
-            _response_span("r3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:05Z"),
-            _function_span("f3", tool_input=same, started_at="2026-05-31T10:00:05Z", ended_at="2026-05-31T10:00:06Z", error=_TOOL_ERROR),
+            _turn_span("turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z"),
+            _response_span("r1", parent_id="turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:01Z"),
+            _function_span("f1", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:01Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
+            _turn_span("turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z"),
+            _response_span("r2", parent_id="turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:03Z"),
+            _function_span("f2", tool_input=same, parent_id="turn_2", started_at="2026-05-31T10:00:03Z", ended_at="2026-05-31T10:00:04Z", error=_TOOL_ERROR),
+            _turn_span("turn_3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z"),
+            _response_span("r3", parent_id="turn_3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:05Z"),
+            _function_span("f3", tool_input=same, parent_id="turn_3", started_at="2026-05-31T10:00:05Z", ended_at="2026-05-31T10:00:06Z", error=_TOOL_ERROR),
         ]),
         model="gpt-4o-mini",
     )
     prescriptions = analyze_bundle(bundle)
     assert len(prescriptions) == 1
     assert prescriptions[0].severity == "high"
+
+
+def test_adapter_does_not_derive_retry_for_same_turn_fanout() -> None:
+    """END-TO-END B3 NEGATIVE: 3 sequential same-tool/same-input function spans
+    under ONE turn span, first errors and the next two succeed. A same-turn fan-out
+    is NOT a retry loop — ARL must emit ZERO prescriptions. (Before the fix this
+    false-collapsed into one retry prescription.)"""
+    same = "lookup customer 42"
+    bundle = bundle_from_recorded_trace(
+        _trace([
+            _turn_span("turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:06Z"),
+            _function_span("s1", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
+            _function_span("s2", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", error=None),
+            _function_span("s3", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", error=None),
+        ]),
+        model="gpt-4o-mini",
+    )
+    assert analyze_bundle(bundle) == []
 
 
 def test_adapter_does_not_derive_retry_for_legitimate_repetition() -> None:
@@ -263,7 +356,9 @@ def test_derived_retry_step_sums_cost_across_attempts() -> None:
     same = "lookup customer 42"
     spans = []
     for i in range(3):
-        s = _function_span(f"s{i}", tool_input=same, started_at=f"2026-05-31T10:00:{i * 2:02d}Z", ended_at=f"2026-05-31T10:00:{i * 2 + 1:02d}Z", error=_TOOL_ERROR)
+        # REAL SHAPE (B3): each retry is a new turn -> distinct turn parent per attempt.
+        spans.append(_turn_span(f"turn_{i}", started_at=f"2026-05-31T10:00:{i * 2:02d}Z", ended_at=f"2026-05-31T10:00:{i * 2 + 1:02d}Z"))
+        s = _function_span(f"s{i}", tool_input=same, parent_id=f"turn_{i}", started_at=f"2026-05-31T10:00:{i * 2:02d}Z", ended_at=f"2026-05-31T10:00:{i * 2 + 1:02d}Z", error=_TOOL_ERROR)
         s["span_data"]["data"] = {"cost_usd": 0.01}
         spans.append(s)
     bundle = bundle_from_recorded_trace(_trace(spans), model="gpt-4o-mini")

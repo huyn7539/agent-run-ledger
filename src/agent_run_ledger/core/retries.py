@@ -38,6 +38,14 @@ class AttemptFacts:
     ``input_fingerprint`` is a digest of the raw tool input (or None when input
     was not captured). It is used ONLY to test same-vs-different input; it carries
     no recoverable content.
+
+    ``turn_id`` is the IMMEDIATE parent span id (the per-turn ``turn_span`` for a
+    real SDK function call). A genuine agentic retry loop spans MULTIPLE turns, so
+    the immediate parent DIFFERS between attempts even though ``retry_scope`` (the
+    agent ancestor) is stable. The grouper uses this to reject a SAME-TURN
+    sequential fan-out (3 calls in one turn) that would otherwise look identical to
+    a retry under scope+name+input alone (NEW-4 false-positive guard, B3). None
+    when no immediate parent was captured.
     """
 
     index: int
@@ -49,6 +57,7 @@ class AttemptFacts:
     has_error: bool
     error_class: str | None
     input_fingerprint: str | None
+    turn_id: str | None = None
 
 
 def _is_tool(a: AttemptFacts) -> bool:
@@ -88,6 +97,14 @@ def _is_retry_continuation(prev: AttemptFacts, cur: AttemptFacts) -> bool:
     if cur.started_at < prev.ended_at:
         return False
     return True
+
+
+def _spans_multiple_turns(group: list[AttemptFacts]) -> bool:
+    """True iff the attempts in *group* span MORE THAN ONE distinct turn (immediate
+    parent). A genuine cross-turn retry has a different turn parent per attempt; a
+    same-turn fan-out shares one. Missing turn ids collapse to a single ``{None}``
+    set -> False, so unknown structure ABSTAINS (never a false positive)."""
+    return len({a.turn_id for a in group}) > 1
 
 
 def collapse_retry_groups(attempts: list[AttemptFacts]) -> list[list[int]]:
@@ -131,10 +148,22 @@ def collapse_retry_groups(attempts: list[AttemptFacts]) -> list[list[int]]:
 
     result: list[list[int]] = []
     for group in emitted:
-        # A multi-attempt tool run is a RETRY loop only if at least one attempt
-        # failed. A repeated-same-input all-success run (idempotent re-fetch) is
-        # not a loop -> split back into singletons (retry_count 0).
-        if len(group) >= 2 and any(a.has_error for a in group):
+        # A multi-attempt tool run is a RETRY loop only if BOTH hold:
+        #   1. at least one attempt FAILED — a repeated-same-input all-success run
+        #      (idempotent re-fetch) is not a loop.
+        #   2. it spans MORE THAN ONE turn (B3 / NEW-4): a genuine agentic retry
+        #      interleaves a model turn before each retry, so the attempts have
+        #      DIFFERENT immediate (turn) parents. A SAME-TURN sequential fan-out
+        #      (>=2 same-input calls in ONE turn, e.g. the model emitting several
+        #      tool calls at once) shares one turn parent and is NOT a retry loop —
+        #      flagging it would tell a builder "you have a retry loop" when they
+        #      do not. Abstain (conservative false-negative) when turn ids are
+        #      missing, so we never falsely collapse on unknown structure.
+        if (
+            len(group) >= 2
+            and any(a.has_error for a in group)
+            and _spans_multiple_turns(group)
+        ):
             result.append([a.index for a in group])
         else:
             result.extend([a.index] for a in group)

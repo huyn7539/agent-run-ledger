@@ -69,8 +69,11 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
     receipts: list[RepairReceipt] = []
     for rx in bundle.prescriptions:
         # This slice grades the retry-cap class only. A prescription whose
-        # one_line_fix sets a retry budget is a retry_loop repair.
-        proof_level = _grade_retry_cap(rx.patch_type, rx.patch)
+        # one_line_fix sets a retry budget is a retry_loop repair. The observed
+        # retry count (recovered from the prescription's evidence) is what the new
+        # cap must actually drop BELOW to earn L2 (B2).
+        observed = _observed_retry_count(rx.evidence)
+        proof_level = _grade_retry_cap(rx.patch_type, rx.patch, observed)
         model_supplied = _model_priced_run(bundle)
         receipts.append(
             RepairReceipt(
@@ -97,19 +100,63 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
     return receipts
 
 
-def _grade_retry_cap(patch_type: str, patch: str) -> str:
+def _grade_retry_cap(patch_type: str, patch: str, observed_retry_count: int | None) -> str:
     """Grade the proof level for a retry-cap repair by STATIC inspection.
 
-    L2 iff the artifact is an APPLYABLE templated retry-cap diff: a unified diff
-    whose target line lowers a retry budget to a finite cap. That mechanically
-    removes the unbounded-retry path — provable without a re-run. The non-runnable
-    config_diff fallback (no file/line target) is relevant but not mechanical ->
-    L1. Anything else -> L0 (diagnostic)."""
+    L2 requires BOTH:
+      1. SYNTAX (``_is_retry_cap_diff``): an applyable unified diff whose target
+         line lowers a retry budget by a real numeric DECREASE (not a substring/
+         path match, not a raise).
+      2. SUFFICIENCY (B2): the new cap must actually remove the OBSERVED failure
+         path. ``observed_retry_count`` is the number of ADDITIONAL attempts seen
+         (a count of 2 is a 3-attempt loop). A new cap that still permits that loop
+         (``new_budget >= observed_retry_count``) does NOT mechanically remove the
+         path, so it grades L1 — the L2 claim ("statically removes the unbounded-
+         retry failure path") would be an overclaim. A new cap STRICTLY below the
+         observed count drops the loop below what was seen and earns L2.
+
+    FAIL CLOSED: if the new cap or the observed count cannot be recovered,
+    sufficiency is UNVERIFIABLE -> never grant L2 (degrade to L1). The non-runnable
+    config_diff fallback (no file/line target) -> L1. Anything else -> L0."""
     if patch_type == "unified_diff" and _is_retry_cap_diff(patch):
-        return "L2"
+        new_budget = _new_cap_value(patch)
+        # Fail closed: unrecoverable new cap or observed count -> not L2.
+        if new_budget is None or observed_retry_count is None:
+            return "L1"
+        # The new cap must drop the loop BELOW the observed additional-attempt count.
+        if new_budget < observed_retry_count:
+            return "L2"
+        return "L1"
     if patch_type == "config_diff":
         return "L1"
     return "L0"
+
+
+# The observed additional-attempt count, as the prescription records it in evidence
+# ("retry_count=<N> additional attempts"). The receipt grades sufficiency against
+# this fact; if it is absent, grading fails closed (no L2).
+_OBSERVED_RETRY_RE = re.compile(r"retry_count\s*=\s*(\d+)\b")
+
+
+def _observed_retry_count(evidence: list[str]) -> int | None:
+    """Recover the observed additional-attempt count from a prescription's evidence,
+    or None if it is not present (sufficiency then unverifiable -> fail closed)."""
+    for line in evidence:
+        m = _OBSERVED_RETRY_RE.search(line)
+        if m is not None:
+            return int(m.group(1))
+    return None
+
+
+def _new_cap_value(patch: str) -> int | None:
+    """Return the integer retry budget the diff's ADDED line sets, reusing the same
+    budget-line recognizer the syntax gate uses. None if not recoverable."""
+    added = [
+        ln[1:]
+        for ln in patch.splitlines()
+        if ln.startswith("+") and not ln.startswith("+++")
+    ]
+    return _retry_budget_value(added)
 
 
 def _is_retry_cap_diff(patch: str) -> bool:

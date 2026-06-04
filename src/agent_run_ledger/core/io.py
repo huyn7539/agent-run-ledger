@@ -76,10 +76,30 @@ def load_trace(path: Path) -> TraceBundle:
         raise TraceParseError(f"invalid trace bundle: {exc}") from exc
 
 
+# A label on the raw export so a reader does not mistake the raw per-span facts for
+# the derived view. The base stores ONE raw step per span (a real retry loop keeps
+# each attempt's raw ``retry_count=0``); the retry collapse — and the
+# ``retry_count=N`` a prescription cites — is a JUDGMENT computed ON READ
+# (prescriptions.derive_retry_steps), never baked into the corpus. Without this
+# note a raw export showing ``retry_count=0`` looks self-contradictory next to a
+# prescription citing ``retry_count=2``. This is a RAW LOCAL facts export.
+_EXPORT_NOTE = (
+    "raw facts export (local): one immutable step per captured span. retry_count "
+    "here is the per-span raw value (0 for un-collapsed attempts); the derived "
+    "retry view (retry_count=N) that prescriptions cite is computed ON READ and is "
+    "not persisted. Allowed metadata values are exported verbatim (raw local "
+    "export, not a remote leak)."
+)
+
+
 def write_trace(bundle: TraceBundle, path: Path) -> None:
     bundle.validate()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(bundle.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    data = bundle.to_dict()
+    # Prepend the label without disturbing the round-trip: from_dict reads only
+    # known keys, so this annotation re-imports as a harmless no-op.
+    payload = {"_export_note": _EXPORT_NOTE, **data}
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def semantic_trace_dict(bundle: TraceBundle) -> dict[str, Any]:

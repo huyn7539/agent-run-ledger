@@ -36,6 +36,10 @@ def derive_retry_steps(bundle: TraceBundle) -> list[StepRecord]:
             name=steps[i].name,
             span_kind=steps[i].span_kind,
             retry_scope=steps[i].retry_scope,
+            # B3: the immediate (turn) parent. A real cross-turn retry differs here
+            # per attempt; a same-turn fan-out shares it. The grouper requires a
+            # retry loop to span >1 turn, rejecting same-turn fan-out.
+            turn_id=steps[i].parent_step_id,
             started_at=steps[i].started_at,
             ended_at=steps[i].ended_at,
             has_error=steps[i].error is not None,

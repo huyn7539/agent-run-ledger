@@ -23,9 +23,15 @@ def _agent_span():
     return {"object": "trace.span", "id": "agent_root", "trace_id": "t", "parent_id": None, "started_at": "2026-05-31T10:00:00Z", "ended_at": "2026-05-31T10:00:10Z", "span_data": {"type": "agent", "name": "A"}, "error": None}
 
 
-def _fn(sid, t0, t1, *, patch_target):
+def _turn(tid, t0, t1):
+    """A per-turn turn span (parent=agent). The REAL SDK opens a fresh one each turn,
+    so cross-turn tool retries parent to DIFFERENT turns (B3 cross-turn shape)."""
+    return {"object": "trace.span", "id": tid, "trace_id": "t", "parent_id": "agent_root", "started_at": t0, "ended_at": t1, "span_data": {"type": "custom", "name": tid}, "error": None}
+
+
+def _fn(sid, t0, t1, *, patch_target, parent_id="agent_root"):
     return {
-        "object": "trace.span", "id": sid, "trace_id": "t", "parent_id": "agent_root",
+        "object": "trace.span", "id": sid, "trace_id": "t", "parent_id": parent_id,
         "started_at": t0, "ended_at": t1,
         "span_data": {"type": "function", "name": "crm.lookup", "input": "{\"id\": 42}", "data": {"retry_budget_patch_target": patch_target}},
         "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "redacted"}},
@@ -33,13 +39,19 @@ def _fn(sid, t0, t1, *, patch_target):
 
 
 def _loop(patch_target):
+    # REAL SHAPE (B3): each retry is a new turn -> distinct turn parent per attempt,
+    # all sharing the agent scope. (Agent-parented fixtures were not the real SDK
+    # shape; the cross-turn guard requires >1 turn for a genuine loop.)
     return {
         "trace": {"trace_id": "t", "workflow_name": "w", "started_at": "2026-05-31T10:00:00Z", "ended_at": "2026-05-31T10:00:10Z"},
         "spans": [
             _agent_span(),
-            _fn("s1", "2026-05-31T10:00:00Z", "2026-05-31T10:00:02Z", patch_target=patch_target),
-            _fn("s2", "2026-05-31T10:00:02Z", "2026-05-31T10:00:04Z", patch_target=patch_target),
-            _fn("s3", "2026-05-31T10:00:04Z", "2026-05-31T10:00:06Z", patch_target=patch_target),
+            _turn("turn_1", "2026-05-31T10:00:00Z", "2026-05-31T10:00:02Z"),
+            _fn("s1", "2026-05-31T10:00:00Z", "2026-05-31T10:00:02Z", patch_target=patch_target, parent_id="turn_1"),
+            _turn("turn_2", "2026-05-31T10:00:02Z", "2026-05-31T10:00:04Z"),
+            _fn("s2", "2026-05-31T10:00:02Z", "2026-05-31T10:00:04Z", patch_target=patch_target, parent_id="turn_2"),
+            _turn("turn_3", "2026-05-31T10:00:04Z", "2026-05-31T10:00:06Z"),
+            _fn("s3", "2026-05-31T10:00:04Z", "2026-05-31T10:00:06Z", patch_target=patch_target, parent_id="turn_3"),
         ],
     }
 
