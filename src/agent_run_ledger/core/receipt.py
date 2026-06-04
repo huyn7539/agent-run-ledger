@@ -26,6 +26,7 @@ content beyond bounded labels/numbers.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -112,9 +113,14 @@ def _grade_retry_cap(patch_type: str, patch: str) -> str:
 
 
 def _is_retry_cap_diff(patch: str) -> bool:
-    """True if *patch* is a unified diff that bounds a retry budget (templated
-    shape). Conservative: requires the diff markers AND a retry-budget signal, so
-    an arbitrary diff is not graded L2."""
+    """True iff *patch* is a unified diff that VERIFIABLY bounds a retry budget —
+    a real numeric DECREASE on a retry-budget line, not a substring match.
+
+    Hardened (fleet HIGH): the old ``"retr" in patch`` check matched the file PATH
+    and graded arbitrary or budget-RAISING diffs as L2. L2 now requires a changed
+    line whose identifier names a retry budget AND whose integer value strictly
+    DECREASES (removed value > added value). That is what "statically removes the
+    unbounded-retry path" actually means."""
     lines = patch.splitlines()
     has_diff_markers = (
         any(line.startswith("--- ") for line in lines)
@@ -123,12 +129,36 @@ def _is_retry_cap_diff(patch: str) -> bool:
     )
     if not has_diff_markers:
         return False
-    # the removed line carries the old (higher) budget, the added line the cap.
-    removed = [line for line in lines if line.startswith("-") and not line.startswith("---")]
-    added = [line for line in lines if line.startswith("+") and not line.startswith("+++")]
-    lowered = (patch.lower())
-    has_retry_signal = "retr" in lowered  # retry / retries / RETRIES
-    return bool(removed and added and has_retry_signal)
+    # Consider only CONTENT lines (exclude file headers ---/+++).
+    removed = [ln[1:] for ln in lines if ln.startswith("-") and not ln.startswith("---")]
+    added = [ln[1:] for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
+    old_budget = _retry_budget_value(removed)
+    new_budget = _retry_budget_value(added)
+    if old_budget is None or new_budget is None:
+        return False
+    # Strict decrease: the cap is lower than the prior budget.
+    return new_budget < old_budget
+
+
+# A retry-budget assignment line: an identifier mentioning retr/retries/attempts/
+# backoff/max_tries set to an integer (e.g. CRM_LOOKUP_MAX_RETRIES = 5,
+# retry_budget: 3). The identifier match is what excludes unrelated diffs whose
+# PATH merely contains "retr" (e.g. retrieve.py).
+_RETRY_BUDGET_LINE = re.compile(
+    r"(retr(y|ies)|max[_ ]?tries|attempts|backoff)\w*\s*[:=]\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
+def _retry_budget_value(content_lines: list[str]) -> int | None:
+    """Return the integer retry budget asserted by exactly one of *content_lines*,
+    or None if zero or more-than-one such line is present (ambiguous -> reject)."""
+    values = [
+        int(m.group(3))
+        for line in content_lines
+        if (m := _RETRY_BUDGET_LINE.search(line)) is not None
+    ]
+    return values[0] if len(values) == 1 else None
 
 
 def _model_priced_run(bundle: TraceBundle) -> bool:
@@ -184,13 +214,17 @@ def _limits(proof_level: str, model_supplied: bool) -> list[str]:
 
 def _next_evidence(proof_level: str) -> list[str]:
     if proof_level == "L2":
+        # Apply-blind guard (fleet HIGH): never tell the user to apply blindly. The
+        # diff is shown for REVIEW; the shipped regression test verifies it before
+        # merge. ARL advises, the user applies.
         return [
-            "apply the templated retry-cap diff and run the shipped regression test",
+            "review the templated retry-cap diff, then apply it and run the shipped "
+            "regression test before merging",
             "observe the next N similar runs for recurrence (L4 evidence)",
         ]
     return [
-        "instrument the trace step with a retry_budget_patch_target (path/before/after) "
-        "to upgrade the artifact to an applyable diff (L2)",
+        "instrument the trace step with a retry_budget_patch_target (path + before "
+        "line) so ARL can generate a reviewable applyable diff (L2)",
     ]
 
 
