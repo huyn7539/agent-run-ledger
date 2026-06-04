@@ -90,6 +90,60 @@ def test_same_input_but_all_success_does_not_collapse() -> None:
     assert groups == [[0], [1], [2]]
 
 
+def _model_attempt(index: int, *, parent_id: str = "p1", started_at: str, ended_at: str) -> AttemptFacts:
+    """A response/model-turn span: not a tool, no input fingerprint."""
+    return AttemptFacts(
+        index=index,
+        name=f"response_{index}",
+        span_kind="response",
+        parent_id=parent_id,
+        started_at=started_at,
+        ended_at=ended_at,
+        has_error=False,
+        error_class=None,
+        input_fingerprint=None,
+    )
+
+
+def test_interleaved_model_turns_do_not_break_a_tool_retry_loop() -> None:
+    """THE REAL AGENTIC RETRY SHAPE (verified against SDK run loop): a failed tool
+    surfaces to the model, which RETRIES in a NEW turn — so a real loop is
+    response, fn(fail), response, fn(fail), response, fn(fail). A model-turn span
+    between same-target tool attempts is a turn boundary; it must NOT break the
+    retry run. The 3 tool attempts collapse to ONE group; the response spans stay
+    their own singletons."""
+    attempts = [
+        _model_attempt(0, started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:01Z"),
+        _attempt(1, started_at="2026-05-31T10:00:01Z", ended_at="2026-05-31T10:00:02Z"),
+        _model_attempt(2, started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:03Z"),
+        _attempt(3, started_at="2026-05-31T10:00:03Z", ended_at="2026-05-31T10:00:04Z"),
+        _model_attempt(4, started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:05Z"),
+        _attempt(5, started_at="2026-05-31T10:00:05Z", ended_at="2026-05-31T10:00:06Z"),
+    ]
+
+    groups = collapse_retry_groups(attempts)
+
+    # the three tool attempts (1,3,5) collapse; the model spans (0,2,4) stay singletons
+    assert [1, 3, 5] in groups
+    assert [0] in groups and [2] in groups and [4] in groups
+    assert len(groups) == 4
+
+
+def test_interleaved_different_tool_breaks_the_run() -> None:
+    """A DIFFERENT tool between same-target attempts is real interleaved work, NOT
+    a retry — it breaks the run (only model-turn spans are tolerated between
+    attempts, never another tool)."""
+    attempts = [
+        _attempt(0, name="crm.lookup"),
+        _attempt(1, name="other.tool", fingerprint="fp_other"),
+        _attempt(2, name="crm.lookup"),
+    ]
+
+    groups = collapse_retry_groups(attempts)
+
+    assert groups == [[0], [1], [2]]
+
+
 def test_interleaved_other_tool_breaks_the_run() -> None:
     """A different-target span between two same-target attempts breaks adjacency:
     the two attempts are NOT consecutive, so no collapse."""
@@ -226,6 +280,55 @@ def test_adapter_derives_retry_loop_from_repeated_function_spans() -> None:
     # honest result). The class is truthy, so severity is still "high".
     assert step.error_class == "Other"
     assert step.span_kind == "function"
+
+    prescriptions = analyze_bundle(bundle)
+    assert len(prescriptions) == 1
+    assert prescriptions[0].severity == "high"
+
+
+def _response_span(span_id: str, *, started_at: str, ended_at: str, parent_id: str = "span_agent_root") -> dict:
+    return {
+        "object": "trace.span",
+        "id": span_id,
+        "trace_id": "trace_retry_0123456789ab",
+        "parent_id": parent_id,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "span_data": {
+            "type": "response",
+            "response_id": f"resp_{span_id}",
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}},
+        },
+        "error": None,
+    }
+
+
+def test_adapter_derives_retry_loop_from_real_interleaved_agentic_shape() -> None:
+    """END-TO-END, REAL SHAPE: the agentic retry loop interleaves a model/response
+    span before each tool retry (model sees the error, retries next turn). ARL must
+    still derive retry_count=2 -> 1 prescription. This is the shape a real OpenAI
+    Agents SDK run emits; the consecutive-only shape was a fixture artifact."""
+    same_input = "lookup customer 42"
+    bundle = bundle_from_recorded_trace(
+        _trace(
+            [
+                _response_span("r1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:01Z"),
+                _function_span("f1", tool_input=same_input, started_at="2026-05-31T10:00:01Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
+                _response_span("r2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:03Z"),
+                _function_span("f2", tool_input=same_input, started_at="2026-05-31T10:00:03Z", ended_at="2026-05-31T10:00:04Z", error=_TOOL_ERROR),
+                _response_span("r3", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:05Z"),
+                _function_span("f3", tool_input=same_input, started_at="2026-05-31T10:00:05Z", ended_at="2026-05-31T10:00:06Z", error=_TOOL_ERROR),
+            ]
+        ),
+        model="gpt-4o-mini",
+    )
+
+    # tool attempts collapse to ONE step; the 3 response spans remain separate
+    tool_steps = [s for s in bundle.steps if s.span_kind == "function"]
+    response_steps = [s for s in bundle.steps if s.span_kind == "response"]
+    assert len(tool_steps) == 1
+    assert tool_steps[0].retry_count == 2
+    assert len(response_steps) == 3
 
     prescriptions = analyze_bundle(bundle)
     assert len(prescriptions) == 1

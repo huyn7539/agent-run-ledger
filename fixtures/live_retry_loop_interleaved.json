@@ -1,0 +1,137 @@
+{
+  "_comment": "A REAL-shape OpenAI Agents SDK trace (export shape verified against the installed SDK: spans.py Span.export + span_data.py ResponseSpanData/FunctionSpanData + usage.py model_usage_to_span_usage). A support agent's crm.lookup tool times out and the agent RETRIES on the SAME input across THREE turns. The native SDK emits NO retry_count; a real loop INTERLEAVES a response (model turn) span before each tool retry. ARL derives retry_count=2 from this structure. This is the demo artifact for the customer conversations — drive it with scripts/demo_repair_receipt.py.",
+  "trace": {
+    "trace_id": "trace_live_retry_demo_0001",
+    "workflow_name": "support-agent",
+    "started_at": "2026-05-31T10:00:00Z",
+    "ended_at": "2026-05-31T10:00:09Z"
+  },
+  "spans": [
+    {
+      "object": "trace.span",
+      "id": "resp_turn1",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_root",
+      "started_at": "2026-05-31T10:00:00Z",
+      "ended_at": "2026-05-31T10:00:01Z",
+      "span_data": {
+        "type": "response",
+        "response_id": "resp_aaa1",
+        "usage": {
+          "requests": 1,
+          "input_tokens": 2200,
+          "output_tokens": 350,
+          "total_tokens": 2550,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens_details": {"reasoning_tokens": 0}
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "fn_attempt1",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_root",
+      "started_at": "2026-05-31T10:00:01Z",
+      "ended_at": "2026-05-31T10:00:03Z",
+      "span_data": {
+        "type": "function",
+        "name": "crm.lookup",
+        "input": "{\"customer_id\": 42}",
+        "data": {
+          "retry_budget_patch_target": {
+            "path": "agent/tools/crm.py",
+            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
+            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
+          }
+        }
+      },
+      "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "details redacted"}}
+    },
+    {
+      "object": "trace.span",
+      "id": "resp_turn2",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_root",
+      "started_at": "2026-05-31T10:00:03Z",
+      "ended_at": "2026-05-31T10:00:04Z",
+      "span_data": {
+        "type": "response",
+        "response_id": "resp_aaa2",
+        "usage": {
+          "requests": 1,
+          "input_tokens": 2350,
+          "output_tokens": 360,
+          "total_tokens": 2710,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens_details": {"reasoning_tokens": 0}
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "fn_attempt2",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_root",
+      "started_at": "2026-05-31T10:00:04Z",
+      "ended_at": "2026-05-31T10:00:06Z",
+      "span_data": {
+        "type": "function",
+        "name": "crm.lookup",
+        "input": "{\"customer_id\": 42}",
+        "data": {
+          "retry_budget_patch_target": {
+            "path": "agent/tools/crm.py",
+            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
+            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
+          }
+        }
+      },
+      "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "details redacted"}}
+    },
+    {
+      "object": "trace.span",
+      "id": "resp_turn3",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_root",
+      "started_at": "2026-05-31T10:00:06Z",
+      "ended_at": "2026-05-31T10:00:07Z",
+      "span_data": {
+        "type": "response",
+        "response_id": "resp_aaa3",
+        "usage": {
+          "requests": 1,
+          "input_tokens": 2500,
+          "output_tokens": 370,
+          "total_tokens": 2870,
+          "input_tokens_details": {"cached_tokens": 0},
+          "output_tokens_details": {"reasoning_tokens": 0}
+        }
+      },
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "fn_attempt3",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_root",
+      "started_at": "2026-05-31T10:00:07Z",
+      "ended_at": "2026-05-31T10:00:09Z",
+      "span_data": {
+        "type": "function",
+        "name": "crm.lookup",
+        "input": "{\"customer_id\": 42}",
+        "data": {
+          "retry_budget_patch_target": {
+            "path": "agent/tools/crm.py",
+            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
+            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
+          }
+        }
+      },
+      "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "details redacted"}}
+    }
+  ]
+}

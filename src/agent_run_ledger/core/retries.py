@@ -44,18 +44,24 @@ class AttemptFacts:
     input_fingerprint: str | None
 
 
-def _is_retry_continuation(prev: AttemptFacts, cur: AttemptFacts) -> bool:
-    """True iff *cur* is another attempt of the SAME operation as *prev*.
+def _is_tool(a: AttemptFacts) -> bool:
+    """Only function/tool spans are eligible to form a retry loop — they carry the
+    name + input needed to tell a genuine loop from legitimate repetition."""
+    return a.span_kind == "function"
 
-    ALL conditions must hold (any failure -> not a continuation -> the run ends):
-      - both are function/tool spans (only these carry name+input to compare)
-      - identical tool name
-      - identical parent (same call site)
-      - both have a captured input fingerprint, and they are EQUAL (same input)
-      - sequential, non-overlapping in time (cur starts at/after prev ends);
-        overlap means parallelism, not retry
+
+def _is_retry_continuation(prev: AttemptFacts, cur: AttemptFacts) -> bool:
+    """True iff tool attempt *cur* is another attempt of the SAME operation as the
+    previous tool attempt *prev* in an open run.
+
+    ALL conditions must hold:
+      - both are function/tool spans
+      - identical tool name + identical parent (same call site)
+      - both carry a captured input fingerprint, and they are EQUAL (same input)
+      - sequential, non-overlapping in time (cur starts at/after prev ended);
+        overlap means parallelism (concurrent fan-out), not retry -> reject
     """
-    if prev.span_kind != "function" or cur.span_kind != "function":
+    if not _is_tool(prev) or not _is_tool(cur):
         return False
     if prev.name != cur.name:
         return False
@@ -65,42 +71,61 @@ def _is_retry_continuation(prev: AttemptFacts, cur: AttemptFacts) -> bool:
         return False
     if prev.input_fingerprint != cur.input_fingerprint:
         return False
-    # Sequential, non-overlapping: cur must start at or after prev ended. ISO-8601
-    # Zulu timestamps sort lexically, so a string compare is a correct time
-    # compare. cur.started_at < prev.ended_at means the windows overlap ->
-    # parallelism (concurrent fan-out), NOT retry -> reject (conservative).
+    # ISO-8601 Zulu timestamps sort lexically, so string compare is a correct time
+    # compare. cur.started_at < prev.ended_at -> overlapping windows -> reject.
     if cur.started_at < prev.ended_at:
         return False
     return True
 
 
 def collapse_retry_groups(attempts: list[AttemptFacts]) -> list[list[int]]:
-    """Group *attempts* (in capture order) into runs that are retry loops.
+    """Group *attempts* (sorted by the caller) into retry loops.
 
-    Returns a list of groups, each a list of the original ``index`` values in
-    order. A group of length >= 2 with at least one error is a retry loop;
-    everything else stays a singleton. Callers sort attempts deterministically
-    (by ``(started_at, index)``) BEFORE calling — this function trusts the given
-    order for adjacency.
+    A REAL agentic retry loop interleaves a model/response turn before each tool
+    retry: ``response, fn(fail), response, fn(fail), response, fn(ok)``. So a
+    NON-tool span between two same-target tool attempts is a TURN BOUNDARY — it
+    does NOT break the retry run, and it is never part of the tool group (it stays
+    its own singleton). Only a DIFFERENT tool between attempts is real interleaved
+    work that breaks the run.
+
+    Returns groups of original ``index`` values, in order. A tool group of length
+    >= 2 with at least one error is a retry loop; everything else stays a
+    singleton. Callers sort attempts deterministically (by ``(started_at, index)``)
+    before calling — this function trusts the given order for adjacency.
     """
     if not attempts:
         return []
 
-    groups: list[list[AttemptFacts]] = [[attempts[0]]]
-    for cur in attempts[1:]:
-        prev = groups[-1][-1]
-        if _is_retry_continuation(prev, cur):
-            groups[-1].append(cur)
+    # `open_run` accumulates consecutive same-target tool attempts (model-turn
+    # spans between them are tolerated and emitted separately as singletons).
+    open_run: list[AttemptFacts] = []
+    emitted: list[list[AttemptFacts]] = []  # closed runs + singletons, in order
+
+    for cur in attempts:
+        if not _is_tool(cur):
+            # A model/response/agent turn span: tolerated between tool attempts —
+            # it neither joins nor breaks an open tool run. Emit it standalone.
+            emitted.append([cur])
+            continue
+        # cur is a tool span.
+        if open_run and _is_retry_continuation(open_run[-1], cur):
+            open_run.append(cur)
         else:
-            groups.append([cur])
+            if open_run:
+                emitted.append(open_run)
+            open_run = [cur]
+    if open_run:
+        emitted.append(open_run)
 
     result: list[list[int]] = []
-    for group in groups:
-        # A multi-attempt run is only a RETRY loop if at least one attempt failed.
-        # A repeated-same-input all-success run (idempotent re-fetch) is not a loop
-        # -> split back into singletons so it derives retry_count 0.
+    for group in emitted:
+        # A multi-attempt tool run is a RETRY loop only if at least one attempt
+        # failed. A repeated-same-input all-success run (idempotent re-fetch) is
+        # not a loop -> split back into singletons (retry_count 0).
         if len(group) >= 2 and any(a.has_error for a in group):
             result.append([a.index for a in group])
         else:
             result.extend([a.index] for a in group)
+    # Preserve original capture order across all emitted groups by first index.
+    result.sort(key=lambda g: g[0])
     return result
