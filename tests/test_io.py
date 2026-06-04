@@ -5,7 +5,12 @@ import json
 
 import pytest
 
-from agent_run_ledger.core.io import load_trace, semantic_trace_dict, write_trace
+from agent_run_ledger.core.io import (
+    TraceParseError,
+    load_trace,
+    semantic_trace_dict,
+    write_trace,
+)
 from agent_run_ledger.core.models import TraceBundle
 
 
@@ -18,11 +23,13 @@ def test_json_roundtrip_via_file(tmp_path: Path) -> None:
     assert semantic_trace_dict(load_trace(out)) == semantic_trace_dict(bundle)
 
 
-def test_malformed_json_raises_decode_error(tmp_path: Path) -> None:
+def test_malformed_json_raises_parse_error(tmp_path: Path) -> None:
+    """Defensive parsing (Constraint 4): malformed JSON surfaces as a typed
+    TraceParseError, not a raw json.JSONDecodeError leaking out of core."""
     path = tmp_path / "bad.json"
     path.write_text("{bad", encoding="utf-8")
 
-    with pytest.raises(json.JSONDecodeError):
+    with pytest.raises(TraceParseError):
         load_trace(path)
 
 

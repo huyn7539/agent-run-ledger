@@ -146,6 +146,54 @@ def test_cli_list_runs_empty_and_populated(tmp_path: Path) -> None:
     assert "run_clean" in populated.output
 
 
+def test_cli_list_runs_shows_cost_on_read_not_stale_cache(tmp_path: Path) -> None:
+    """The displayed cost must be computed on read from the FACTS, NOT the cached
+    total_cost_usd — otherwise the Task-45 model fix is invisible in the demo. A
+    run with a STALE $0 cached total but real tokens+model must list a non-zero
+    cost."""
+    from agent_run_ledger.core.cost import cost_on_read
+    from agent_run_ledger.core.models import RunRecord, StepRecord, TraceBundle
+    from agent_run_ledger.core.storage import save_bundle
+
+    run = RunRecord(
+        id="run_stale_cost",
+        workflow="w",
+        framework="synthetic",
+        provider="synthetic",
+        model="gpt-4o-mini",
+        started_at="2026-05-31T10:00:00Z",
+        ended_at="2026-05-31T10:00:01Z",
+        success_label="failed",
+        total_cost_usd=0.0,  # STALE cache
+        total_input_tokens=1000,
+        total_output_tokens=500,
+    )
+    step = StepRecord(
+        id="s1",
+        run_id="run_stale_cost",
+        step_type="model",
+        name="plan",
+        started_at="2026-05-31T10:00:00Z",
+        ended_at="2026-05-31T10:00:01Z",
+        input_tokens=1000,
+        output_tokens=500,
+        cost_usd=0.0,
+    )
+    bundle = TraceBundle(run=run, steps=[step])
+    save_bundle(tmp_path / "ledger.sqlite", bundle)
+
+    expected = cost_on_read(bundle)
+    assert expected > 0.0  # the compute-on-read value the user must see
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["list-runs", "--db", str(tmp_path / "ledger.sqlite")])
+
+    assert result.exit_code == 0
+    assert f"${expected:.6f}" in result.output
+    # the stale $0.000000 cache must NOT be what's shown
+    assert "$0.000000" not in result.output
+
+
 def test_cli_import_non_demo_shape(tmp_path: Path, non_demo_bundle) -> None:
     runner = CliRunner()
     db = tmp_path / "ledger.sqlite"
