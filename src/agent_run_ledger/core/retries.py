@@ -28,15 +28,22 @@ from dataclasses import dataclass
 class AttemptFacts:
     """A neutral, content-free projection of one span, for retry grouping.
 
+    ``retry_scope`` is the STABLE ancestor that groups retries of one call site
+    across turns. A real agentic retry loop spans multiple turns, so the immediate
+    parent differs between attempts; the scope (the agent-span ancestor, resolved
+    by the adapter) is stable. Keying on the immediate parent silently no-ops on
+    every real multi-turn retry — the scope is what makes cross-turn detection
+    correct. None when no scope could be resolved.
+
     ``input_fingerprint`` is a digest of the raw tool input (or None when input
     was not captured). It is used ONLY to test same-vs-different input; it carries
-    no recoverable content and is never persisted.
+    no recoverable content.
     """
 
     index: int
     name: str
     span_kind: str | None
-    parent_id: str | None
+    retry_scope: str | None
     started_at: str
     ended_at: str
     has_error: bool
@@ -56,7 +63,10 @@ def _is_retry_continuation(prev: AttemptFacts, cur: AttemptFacts) -> bool:
 
     ALL conditions must hold:
       - both are function/tool spans
-      - identical tool name + identical parent (same call site)
+      - identical tool name
+      - identical retry_scope (same stable ancestor/call site across turns); a
+        handoff to a DIFFERENT agent calling the same tool has a different scope
+        and must NOT collapse. Both scopes must be present (None -> abstain).
       - both carry a captured input fingerprint, and they are EQUAL (same input)
       - sequential, non-overlapping in time (cur starts at/after prev ended);
         overlap means parallelism (concurrent fan-out), not retry -> reject
@@ -65,7 +75,9 @@ def _is_retry_continuation(prev: AttemptFacts, cur: AttemptFacts) -> bool:
         return False
     if prev.name != cur.name:
         return False
-    if prev.parent_id != cur.parent_id:
+    if prev.retry_scope is None or cur.retry_scope is None:
+        return False
+    if prev.retry_scope != cur.retry_scope:
         return False
     if prev.input_fingerprint is None or cur.input_fingerprint is None:
         return False

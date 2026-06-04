@@ -62,6 +62,8 @@ def _loop_trace(patch_target=None):
             "ended_at": "2026-05-31T10:00:10Z",
         },
         "spans": [
+            # the stable agent ancestor that scopes the retried tool spans
+            {"object": "trace.span", "id": "agent_root", "trace_id": "trace_receipt_0123456789", "parent_id": None, "started_at": "2026-05-31T10:00:00Z", "ended_at": "2026-05-31T10:00:10Z", "span_data": {"type": "agent", "name": "Support Agent"}, "error": None},
             _function_span("s1", tool_input="lookup 42", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", patch_target=patch_target),
             _function_span("s2", tool_input="lookup 42", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", patch_target=patch_target),
             _function_span("s3", tool_input="lookup 42", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", patch_target=patch_target),

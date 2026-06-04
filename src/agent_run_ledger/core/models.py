@@ -333,6 +333,20 @@ class StepRecord:
     # this edge is the only structural fact lost when the tree is flattened.
     parent_step_id: str | None = None
     span_kind: str | None = None
+    # Trace-derived retry detection FACTS (content-free, computed at capture):
+    #   retry_scope     = the stable ancestor that groups retries of one call site
+    #                     across turns (a real agentic retry spans multiple turns,
+    #                     so the immediate parent differs; the agent-span ancestor
+    #                     is stable). NULL when no scope could be resolved.
+    #   input_fingerprint = a one-way digest of the raw tool input, used to tell a
+    #                     genuine retry (same input) from legitimate repetition.
+    #                     A digest carries NO recoverable content (leak-safe). NULL
+    #                     when the input was not captured.
+    # Both are FACTS stored on the immutable base; the retry_count COLLAPSE is a
+    # JUDGMENT computed ON READ (prescriptions.derive_retry_steps), never baked in,
+    # so a future detector fix can re-derive from the raw corpus.
+    retry_scope: str | None = None
+    input_fingerprint: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     # L7: observed cost FACTS the API returns. cached_input/reasoning tokens are
@@ -382,6 +396,10 @@ class StepRecord:
                 str(data["parent_step_id"]) if data.get("parent_step_id") is not None else None
             ),
             span_kind=(str(data["span_kind"]) if data.get("span_kind") is not None else None),
+            retry_scope=(str(data["retry_scope"]) if data.get("retry_scope") is not None else None),
+            input_fingerprint=(
+                str(data["input_fingerprint"]) if data.get("input_fingerprint") is not None else None
+            ),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cached_input_tokens=_as_int(data.get("cached_input_tokens")),
@@ -425,6 +443,10 @@ class StepRecord:
             data["parent_step_id"] = self.parent_step_id
         if self.span_kind is not None:
             data["span_kind"] = self.span_kind
+        if self.retry_scope is not None:
+            data["retry_scope"] = self.retry_scope
+        if self.input_fingerprint is not None:
+            data["input_fingerprint"] = self.input_fingerprint
         if self.provider_reported_cost_usd is not None:
             data["provider_reported_cost_usd"] = round(self.provider_reported_cost_usd, 8)
         if self.error is not None:

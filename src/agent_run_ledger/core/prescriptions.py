@@ -1,14 +1,80 @@
 from __future__ import annotations
 
 import difflib
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
 from agent_run_ledger.core.models import PrescriptionRecord, StepRecord, TraceBundle
+from agent_run_ledger.core.retries import AttemptFacts, collapse_retry_groups
 
 
 def analyze_bundle(bundle: TraceBundle) -> list[PrescriptionRecord]:
-    return detect_retry_cost_loops(bundle)
+    # The detector reads the COLLAPSED view computed on read — the immutable base
+    # keeps one raw StepRecord per span; the retry collapse is a JUDGMENT, never
+    # baked into the corpus (so a future detector fix can re-derive from facts).
+    collapsed = replace(bundle, steps=derive_retry_steps(bundle))
+    return detect_retry_cost_loops(collapsed)
+
+
+def derive_retry_steps(bundle: TraceBundle) -> list[StepRecord]:
+    """Collapse raw per-span steps into a retry-aware view, ON READ.
+
+    A genuine retry loop is N repeated same-scope, same-input tool attempts with
+    >=1 failure (across turns, so the immediate parent differs but retry_scope is
+    stable). Such a run collapses to ONE StepRecord with retry_count=N-1, tokens +
+    cost SUMMED, error_class from the last attempt. Everything else (model/response
+    spans, legitimate repetition, app-supplied explicit retry_count) passes through
+    unchanged. The base bundle.steps is NOT mutated."""
+    steps = bundle.steps
+    # Deterministic order mirrors provenance.py: (started_at, id).
+    indexed = sorted(range(len(steps)), key=lambda i: (steps[i].started_at, steps[i].id))
+    attempts = [
+        AttemptFacts(
+            index=pos,
+            name=steps[i].name,
+            span_kind=steps[i].span_kind,
+            retry_scope=steps[i].retry_scope,
+            started_at=steps[i].started_at,
+            ended_at=steps[i].ended_at,
+            has_error=steps[i].error is not None,
+            error_class=steps[i].error_class,
+            # An app-supplied explicit retry_count step is NOT eligible for
+            # derivation (its count is authoritative); withhold its fingerprint so
+            # the grouper leaves it a singleton.
+            input_fingerprint=(steps[i].input_fingerprint if steps[i].retry_count == 0 else None),
+        )
+        for pos, i in enumerate(indexed)
+    ]
+    groups = collapse_retry_groups(attempts)
+    # map sorted-position groups back to original step indices, preserving order
+    result: list[StepRecord] = []
+    for group in groups:
+        original = [indexed[pos] for pos in group]
+        result.append(_collapse_steps([steps[i] for i in original]))
+    return result
+
+
+def _collapse_steps(group: list[StepRecord]) -> StepRecord:
+    """Collapse 1+ raw attempt steps into one. A singleton returns unchanged."""
+    if len(group) == 1:
+        return group[0]
+    first, last = group[0], group[-1]
+    reported = [s.provider_reported_cost_usd for s in group if s.provider_reported_cost_usd is not None]
+    return replace(
+        first,
+        ended_at=last.ended_at,
+        retry_count=len(group) - 1,
+        input_tokens=sum(s.input_tokens for s in group),
+        output_tokens=sum(s.output_tokens for s in group),
+        cached_input_tokens=sum(s.cached_input_tokens for s in group),
+        reasoning_tokens=sum(s.reasoning_tokens for s in group),
+        cost_usd=sum(s.cost_usd for s in group),
+        provider_reported_cost_usd=(sum(reported) if reported else None),
+        # last attempt's terminal error class drives severity.
+        error=last.error,
+        error_class=last.error_class,
+    )
 
 
 def detect_retry_cost_loops(

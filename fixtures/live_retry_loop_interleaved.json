@@ -1,30 +1,43 @@
 {
-  "_comment": "A REAL-shape OpenAI Agents SDK trace (export shape verified against the installed SDK: spans.py Span.export + span_data.py ResponseSpanData/FunctionSpanData + usage.py model_usage_to_span_usage). A support agent's crm.lookup tool times out and the agent RETRIES on the SAME input across THREE turns. The native SDK emits NO retry_count; a real loop INTERLEAVES a response (model turn) span before each tool retry. ARL derives retry_count=2 from this structure. This is the demo artifact for the customer conversations — drive it with scripts/demo_repair_receipt.py.",
+  "_comment": "A REAL-shape OpenAI Agents SDK trace (export shape verified against the installed SDK: spans.py Span.export + span_data.py AgentSpanData/ResponseSpanData/FunctionSpanData + usage.py model_usage_to_span_usage; span tree verified against run.py 1045-1278 + tracing/provider.py:391). A support agent's crm.lookup tool times out and the agent RETRIES on the SAME input across THREE TURNS. The native SDK emits NO retry_count. CRITICALLY: each retry is a NEW turn, so the three crm.lookup spans have DIFFERENT immediate parents (their per-turn turn spans) but the SAME agent-span ancestor. ARL resolves the agent ancestor (retry_scope) and derives retry_count=2 ON READ. This is the demo artifact for the customer conversations — drive it with scripts/demo_repair_receipt.py.",
   "trace": {
     "trace_id": "trace_live_retry_demo_0001",
     "workflow_name": "support-agent",
     "started_at": "2026-05-31T10:00:00Z",
-    "ended_at": "2026-05-31T10:00:09Z"
+    "ended_at": "2026-05-31T10:00:12Z"
   },
   "spans": [
     {
       "object": "trace.span",
+      "id": "agent_support",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": null,
+      "started_at": "2026-05-31T10:00:00Z",
+      "ended_at": "2026-05-31T10:00:12Z",
+      "span_data": {"type": "agent", "name": "Support Agent"},
+      "error": null
+    },
+    {
+      "object": "trace.span",
+      "id": "turn_1",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_support",
+      "started_at": "2026-05-31T10:00:00Z",
+      "ended_at": "2026-05-31T10:00:04Z",
+      "span_data": {"type": "custom", "name": "turn_1"},
+      "error": null
+    },
+    {
+      "object": "trace.span",
       "id": "resp_turn1",
       "trace_id": "trace_live_retry_demo_0001",
-      "parent_id": "agent_root",
+      "parent_id": "turn_1",
       "started_at": "2026-05-31T10:00:00Z",
       "ended_at": "2026-05-31T10:00:01Z",
       "span_data": {
         "type": "response",
         "response_id": "resp_aaa1",
-        "usage": {
-          "requests": 1,
-          "input_tokens": 2200,
-          "output_tokens": 350,
-          "total_tokens": 2550,
-          "input_tokens_details": {"cached_tokens": 0},
-          "output_tokens_details": {"reasoning_tokens": 0}
-        }
+        "usage": {"requests": 1, "input_tokens": 2200, "output_tokens": 350, "total_tokens": 2550, "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}}
       },
       "error": null
     },
@@ -32,41 +45,38 @@
       "object": "trace.span",
       "id": "fn_attempt1",
       "trace_id": "trace_live_retry_demo_0001",
-      "parent_id": "agent_root",
+      "parent_id": "turn_1",
       "started_at": "2026-05-31T10:00:01Z",
       "ended_at": "2026-05-31T10:00:03Z",
       "span_data": {
         "type": "function",
         "name": "crm.lookup",
         "input": "{\"customer_id\": 42}",
-        "data": {
-          "retry_budget_patch_target": {
-            "path": "agent/tools/crm.py",
-            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
-            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
-          }
-        }
+        "data": {"retry_budget_patch_target": {"path": "agent/tools/crm.py", "before": "CRM_LOOKUP_MAX_RETRIES = 5", "after": "CRM_LOOKUP_MAX_RETRIES = 0"}}
       },
       "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "details redacted"}}
     },
     {
       "object": "trace.span",
+      "id": "turn_2",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_support",
+      "started_at": "2026-05-31T10:00:04Z",
+      "ended_at": "2026-05-31T10:00:08Z",
+      "span_data": {"type": "custom", "name": "turn_2"},
+      "error": null
+    },
+    {
+      "object": "trace.span",
       "id": "resp_turn2",
       "trace_id": "trace_live_retry_demo_0001",
-      "parent_id": "agent_root",
-      "started_at": "2026-05-31T10:00:03Z",
-      "ended_at": "2026-05-31T10:00:04Z",
+      "parent_id": "turn_2",
+      "started_at": "2026-05-31T10:00:04Z",
+      "ended_at": "2026-05-31T10:00:05Z",
       "span_data": {
         "type": "response",
         "response_id": "resp_aaa2",
-        "usage": {
-          "requests": 1,
-          "input_tokens": 2350,
-          "output_tokens": 360,
-          "total_tokens": 2710,
-          "input_tokens_details": {"cached_tokens": 0},
-          "output_tokens_details": {"reasoning_tokens": 0}
-        }
+        "usage": {"requests": 1, "input_tokens": 2350, "output_tokens": 360, "total_tokens": 2710, "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}}
       },
       "error": null
     },
@@ -74,41 +84,38 @@
       "object": "trace.span",
       "id": "fn_attempt2",
       "trace_id": "trace_live_retry_demo_0001",
-      "parent_id": "agent_root",
-      "started_at": "2026-05-31T10:00:04Z",
-      "ended_at": "2026-05-31T10:00:06Z",
+      "parent_id": "turn_2",
+      "started_at": "2026-05-31T10:00:05Z",
+      "ended_at": "2026-05-31T10:00:07Z",
       "span_data": {
         "type": "function",
         "name": "crm.lookup",
         "input": "{\"customer_id\": 42}",
-        "data": {
-          "retry_budget_patch_target": {
-            "path": "agent/tools/crm.py",
-            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
-            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
-          }
-        }
+        "data": {"retry_budget_patch_target": {"path": "agent/tools/crm.py", "before": "CRM_LOOKUP_MAX_RETRIES = 5", "after": "CRM_LOOKUP_MAX_RETRIES = 0"}}
       },
       "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "details redacted"}}
     },
     {
       "object": "trace.span",
+      "id": "turn_3",
+      "trace_id": "trace_live_retry_demo_0001",
+      "parent_id": "agent_support",
+      "started_at": "2026-05-31T10:00:08Z",
+      "ended_at": "2026-05-31T10:00:12Z",
+      "span_data": {"type": "custom", "name": "turn_3"},
+      "error": null
+    },
+    {
+      "object": "trace.span",
       "id": "resp_turn3",
       "trace_id": "trace_live_retry_demo_0001",
-      "parent_id": "agent_root",
-      "started_at": "2026-05-31T10:00:06Z",
-      "ended_at": "2026-05-31T10:00:07Z",
+      "parent_id": "turn_3",
+      "started_at": "2026-05-31T10:00:08Z",
+      "ended_at": "2026-05-31T10:00:09Z",
       "span_data": {
         "type": "response",
         "response_id": "resp_aaa3",
-        "usage": {
-          "requests": 1,
-          "input_tokens": 2500,
-          "output_tokens": 370,
-          "total_tokens": 2870,
-          "input_tokens_details": {"cached_tokens": 0},
-          "output_tokens_details": {"reasoning_tokens": 0}
-        }
+        "usage": {"requests": 1, "input_tokens": 2500, "output_tokens": 370, "total_tokens": 2870, "input_tokens_details": {"cached_tokens": 0}, "output_tokens_details": {"reasoning_tokens": 0}}
       },
       "error": null
     },
@@ -116,20 +123,14 @@
       "object": "trace.span",
       "id": "fn_attempt3",
       "trace_id": "trace_live_retry_demo_0001",
-      "parent_id": "agent_root",
-      "started_at": "2026-05-31T10:00:07Z",
-      "ended_at": "2026-05-31T10:00:09Z",
+      "parent_id": "turn_3",
+      "started_at": "2026-05-31T10:00:09Z",
+      "ended_at": "2026-05-31T10:00:11Z",
       "span_data": {
         "type": "function",
         "name": "crm.lookup",
         "input": "{\"customer_id\": 42}",
-        "data": {
-          "retry_budget_patch_target": {
-            "path": "agent/tools/crm.py",
-            "before": "CRM_LOOKUP_MAX_RETRIES = 5",
-            "after": "CRM_LOOKUP_MAX_RETRIES = 0"
-          }
-        }
+        "data": {"retry_budget_patch_target": {"path": "agent/tools/crm.py", "before": "CRM_LOOKUP_MAX_RETRIES = 5", "after": "CRM_LOOKUP_MAX_RETRIES = 0"}}
       },
       "error": {"message": "Error running tool", "data": {"tool_name": "crm.lookup", "error": "details redacted"}}
     }

@@ -16,7 +16,6 @@ from agent_run_ledger.core.models import (
 )
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.provenance import compute_provenance_hash
-from agent_run_ledger.core.retries import AttemptFacts, collapse_retry_groups
 from agent_run_ledger.core.storage import save_bundle
 
 class NoSpansCapturedError(RuntimeError):
@@ -79,17 +78,20 @@ class OpenAILedgerTraceProcessor:
             raise NoSpansCapturedError(
                 f"OpenAI trace {self._trace_id!r} ended with zero captured spans"
             )
-        # Build a content-free fact projection per span, sorted deterministically
-        # by (started_at, id) — mirrors provenance.py so step identity is stable.
-        # on_span_end fires in COMPLETION order, not start order, so this sort is
-        # load-bearing for correct retry adjacency.
-        raw_facts = [_span_facts(span, idx) for idx, span in enumerate(self._spans, start=1)]
-        for f in raw_facts:
-            # Preserve prior fallback: a span without its own start uses the trace
-            # start (kept here, not in the free helper, which has no trace context).
+        # One StepRecord PER SPAN — the immutable base stores raw FACTS. The retry
+        # COLLAPSE is computed ON READ (prescriptions.derive_retry_steps), never
+        # baked into the corpus, so a future detector fix can re-derive from facts.
+        facts = [_span_facts(span, idx) for idx, span in enumerate(self._spans, start=1)]
+        for f in facts:
+            # A span without its own start uses the trace start (the free helper
+            # has no trace context, so this fallback lives here).
             if not f["started_at"]:
                 f["started_at"] = self._started_at
-        facts = sorted(raw_facts, key=lambda f: (f["started_at"], f["id"]))
+        # Resolve retry_scope (the stable agent-span ancestor) per span by walking
+        # the parent chain. A real agentic retry spans multiple turns, so the
+        # immediate parent differs; the agent ancestor is the stable grouping key.
+        scope_by_id = _resolve_retry_scopes(facts)
+
         model = next((f["model"] for f in facts if f["model"] != "unknown"), "unknown")
         # Task 45: trace-extracted model wins (Chat Completions generation spans
         # carry it). Only when NO span exposed a model do we fall back to the
@@ -97,28 +99,7 @@ class OpenAILedgerTraceProcessor:
         if model == "unknown" and self.model_hint:
             model = self.model_hint
 
-        # NEW-4: derive retry loops from repeated same-target tool spans. The
-        # input fingerprint (a transient digest, never stored) is what lets us
-        # tell a genuine loop from legitimate repeated calls. Only function/tool
-        # spans WITHOUT an app-supplied retry_count are eligible for derivation;
-        # the explicit custom-span retry_count path is preserved unchanged.
-        attempts = [
-            AttemptFacts(
-                index=i,
-                name=f["name"],
-                span_kind=f["span_kind"],
-                parent_id=f["parent_step_id"],
-                started_at=f["started_at"],
-                ended_at=f["ended_at"],
-                has_error=f["raw_error"] is not None,
-                error_class=classify_error(f["raw_error"]),
-                input_fingerprint=(f["input_fingerprint"] if not f["explicit_retry"] else None),
-            )
-            for i, f in enumerate(facts)
-        ]
-        groups = collapse_retry_groups(attempts)
-
-        steps = [self._step_from_group([facts[i] for i in group]) for group in groups]
+        steps = [self._step_from_fact(f, scope_by_id.get(f["id"])) for f in facts]
         total_cost = sum(s.cost_usd for s in steps)
         total_input = sum(s.input_tokens for s in steps)
         total_output = sum(s.output_tokens for s in steps)
@@ -136,64 +117,80 @@ class OpenAILedgerTraceProcessor:
             total_output_tokens=total_output,
         )
         bundle = TraceBundle(run=run, steps=steps)
-        # L5: stamp the provenance hash LOCALLY at capture — the un-backfillable
-        # seed of proof-of-real. Computed over immutable facts only (no cost).
+        # L5: stamp the provenance hash LOCALLY at capture, over the RAW spans (no
+        # derived collapse) — the un-backfillable seed of proof-of-real.
         return replace(bundle, run=replace(run, provenance_hash=compute_provenance_hash(bundle)))
 
-    def _step_from_group(self, group: list[dict[str, Any]]) -> StepRecord:
-        """Build one StepRecord from a group of 1+ attempt facts.
+    def _step_from_fact(self, f: dict[str, Any], retry_scope: str | None) -> StepRecord:
+        """Build one StepRecord from one span's facts (no collapse — that's on read).
 
-        A singleton preserves prior single-span behavior exactly. A multi-attempt
-        group is a DERIVED retry loop: retry_count = N-1, identity/timestamps from
-        the first/last attempt, tokens + cost SUMMED across attempts (the
-        wasted-cost estimate divides cost_usd by the attempt count, so summing is
-        required), and error_class from the LAST attempt (the terminal state that
-        drives severity)."""
-        first = group[0]
-        last = group[-1]
-        derived_retries = len(group) - 1
-        # An explicit app-supplied retry_count (custom-span data) is never derived;
-        # such spans are singletons here, so use their own retry_count. A derived
-        # group uses N-1.
-        retry_count = first["retry_count"] if derived_retries == 0 else derived_retries
-        reported_costs = [g["reported_cost"] for g in group if g["reported_cost"] is not None]
-        reported_cost = sum(reported_costs) if reported_costs else None
-        raw_error = last["raw_error"]
+        ``input_fingerprint`` and ``retry_scope`` are stored as content-free FACTS
+        so the retry collapse can be re-derived on read. An app-supplied explicit
+        retry_count is preserved on the step (authoritative; not re-derived)."""
+        raw_error = f["raw_error"]
         return StepRecord(
-            id=first["id"],
+            id=f["id"],
             run_id=self._trace_id,
             # L4: preserve the call-graph edge + OTEL-aligned span kind.
-            parent_step_id=first["parent_step_id"],
-            span_kind=first["span_kind"],
-            step_type=first["step_type"],
-            name=first["name"],
-            started_at=first["started_at"],
-            ended_at=last["ended_at"],
-            input_tokens=sum(g["input_tokens"] for g in group),
-            output_tokens=sum(g["output_tokens"] for g in group),
-            # Task 45 / L7: cached + reasoning token FACTS, summed across attempts.
-            cached_input_tokens=sum(g["cached_input"] for g in group),
-            reasoning_tokens=sum(g["reasoning"] for g in group),
-            # L7: the span-reported cost FACT, summed; None only if no attempt
-            # reported one (so cost_on_read can fall back to tokens).
-            provider_reported_cost_usd=reported_cost,
-            cost_usd=sum(g["cost"] for g in group),
-            retry_count=retry_count,
+            parent_step_id=f["parent_step_id"],
+            span_kind=f["span_kind"],
+            retry_scope=retry_scope,
+            input_fingerprint=f["input_fingerprint"],
+            step_type=f["step_type"],
+            name=f["name"],
+            started_at=f["started_at"],
+            ended_at=f["ended_at"],
+            input_tokens=f["input_tokens"],
+            output_tokens=f["output_tokens"],
+            # Task 45 / L7: cached + reasoning token FACTS.
+            cached_input_tokens=f["cached_input"],
+            reasoning_tokens=f["reasoning"],
+            provider_reported_cost_usd=f["reported_cost"],
+            cost_usd=f["cost"],
+            retry_count=f["retry_count"],
             error=raw_error,
             # L8: bounded error_class at the chokepoint (raw message dropped).
             error_class=classify_error(raw_error),
             redaction_mode="metadata_only",
-            metadata=first["metadata"],
+            metadata=f["metadata"],
         )
 
 
-def _span_facts(span: dict[str, Any], idx: int) -> dict[str, Any]:
-    """Project one raw span into a flat fact dict + a TRANSIENT input fingerprint.
+def _resolve_retry_scopes(facts: list[dict[str, Any]]) -> dict[str, str | None]:
+    """Map each span id -> its retry_scope (the nearest AGENT-span ancestor id).
 
-    The fingerprint is a digest of the raw tool input; it is used ONLY for
-    retry-loop grouping and is NEVER stored (it does not flow into StepRecord).
-    Computed here, while the raw span is still in scope, because input is redacted
-    once a StepRecord is constructed (models.sanitize_metadata)."""
+    A real SDK retry spans multiple turns: a function span's immediate parent is
+    that turn's turn-span (different per turn), but the agent span above all turns
+    of one agent is stable. Walking function -> turn -> agent yields the stable
+    grouping key. A handoff to a different agent yields a different agent ancestor,
+    so cross-agent repeats do NOT collapse. Falls back to the span's own id if no
+    agent ancestor exists (so an isolated tool span groups only with itself)."""
+    by_id = {f["id"]: f for f in facts}
+    scope: dict[str, str | None] = {}
+    for f in facts:
+        seen: set[str] = set()
+        node = f
+        ancestor: str | None = None
+        while node is not None and node["id"] not in seen:
+            seen.add(node["id"])
+            if node["span_kind"] == "agent":
+                ancestor = node["id"]
+                break
+            parent_id = node["parent_step_id"]
+            node = by_id.get(parent_id) if parent_id is not None else None
+        # No agent ancestor in the captured tree -> scope by the span's own id, so
+        # it can never falsely group with a different span.
+        scope[f["id"]] = ancestor if ancestor is not None else f["id"]
+    return scope
+
+
+def _span_facts(span: dict[str, Any], idx: int) -> dict[str, Any]:
+    """Project one raw span into a flat fact dict + the input fingerprint.
+
+    The fingerprint is a ONE-WAY digest of the raw tool input — used to tell a
+    genuine retry (same input) from legitimate repetition. It carries no
+    recoverable content, so it is stored as a content-free FACT (security-cleared);
+    the raw input itself is never stored (redacted at StepRecord construction)."""
     span_data = _extract_span_data(span)
     usage = _extract_usage(span)
     cached_input, reasoning = _extract_token_details(span)
@@ -201,7 +198,6 @@ def _span_facts(span: dict[str, Any], idx: int) -> dict[str, Any]:
     parent_id = (
         span.get("parent_id") or span.get("parent_span_id") or span_data.get("parent_id")
     )
-    explicit_retry = _has_explicit_retry(span)
     return {
         "id": str(span.get("span_id") or span.get("id") or f"span_{idx}"),
         "parent_step_id": str(parent_id) if parent_id is not None else None,
@@ -219,7 +215,6 @@ def _span_facts(span: dict[str, Any], idx: int) -> dict[str, Any]:
         "cost": _extract_cost(span),
         "reported_cost": _extract_reported_cost(span),
         "retry_count": _extract_retry_count(span),
-        "explicit_retry": explicit_retry,
         "model": _extract_model(span),
         "raw_error": _extract_error(span),
         "metadata": _safe_metadata(span),
@@ -227,19 +222,10 @@ def _span_facts(span: dict[str, Any], idx: int) -> dict[str, Any]:
     }
 
 
-def _has_explicit_retry(span: dict[str, Any]) -> bool:
-    """True if the app instrumented retry_count directly (custom-span data). Such
-    spans are NOT eligible for trace-derivation — their count is authoritative."""
-    custom_data = _extract_custom_data(span)
-    return span.get("retry_count") is not None or custom_data.get("retry_count") is not None
-
-
 def _input_fingerprint(span_data: dict[str, Any]) -> str | None:
-    """Return a stable digest of the span's raw tool input, or None if absent.
-
-    Transient + content-free: the digest is used only to compare same-vs-different
-    input for retry grouping; the raw input is discarded and never stored, so this
-    leaks nothing (a digest is not reversible to content)."""
+    """Return a stable one-way digest of the span's raw tool input, or None if
+    absent. Content-free: a digest is not reversible to content, so it is safe to
+    store as a retry-grouping FACT."""
     raw_input = span_data.get("input")
     if raw_input is None:
         return None
