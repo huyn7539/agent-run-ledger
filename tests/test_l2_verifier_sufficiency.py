@@ -12,9 +12,11 @@ The honest GENERATED pipeline always uses ``allowed_retries=0`` so it is safe â€
 gap is the VERIFIER boundary: a stored/imported prescription whose diff lowers but
 does not prevent the observed loop. ``build_receipts`` must compare the new cap
 against the observed retry count (recovered from ``rx.evidence``) and require
-``new_budget <= observed_retry_count`` to be FALSE â€” i.e. the cap must drop the loop
-below the observed attempt count. If the observed count cannot be recovered,
-grading FAILS CLOSED to L1 (never grant L2 when sufficiency is unverifiable).
+``new_budget < observed_retry_count`` (STRICT): the cap must drop the loop strictly
+below the observed additional-attempt count. A cap EQUAL to the observed count still
+permits exactly the observed loop, so it does NOT earn L2. If the observed count
+cannot be recovered, grading FAILS CLOSED to L1 (never grant L2 when sufficiency is
+unverifiable).
 """
 
 from __future__ import annotations
@@ -97,9 +99,9 @@ def test_lowered_but_insufficient_cap_is_not_graded_l2() -> None:
     assert receipts[0].proof_level == "L1"
 
 
-def test_sufficient_cap_at_or_below_observed_count_is_graded_l2() -> None:
-    """The strong honest path: capping to 0 (<= the observed 2) DOES prevent the
-    observed loop -> L2 is earned."""
+def test_sufficient_cap_below_observed_count_is_graded_l2() -> None:
+    """The strong honest path: capping to 0 (strictly < the observed 2) DOES prevent
+    the observed loop -> L2 is earned."""
     bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=0)
     receipts = build_receipts(bundle)
     assert len(receipts) == 1
