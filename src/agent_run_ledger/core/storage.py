@@ -118,6 +118,8 @@ def init_db(db_path: Path) -> None:
                 run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
                 parent_step_id TEXT,
                 span_kind TEXT,
+                retry_scope TEXT,
+                input_fingerprint TEXT,
                 step_type TEXT NOT NULL,
                 name TEXT NOT NULL,
                 started_at TEXT NOT NULL,
@@ -178,6 +180,9 @@ def init_db(db_path: Path) -> None:
         _ensure_column(conn, "steps", "parent_step_id", "TEXT")
         _ensure_column(conn, "steps", "span_kind", "TEXT")
         _ensure_column(conn, "steps", "error_class", "TEXT")
+        # Trace-derived retry FACTS (content-free); additive, nullable.
+        _ensure_column(conn, "steps", "retry_scope", "TEXT")
+        _ensure_column(conn, "steps", "input_fingerprint", "TEXT")
         # Stamp the file's DDL version. Stays put once at USER_VERSION (no DDL on
         # the hot path → user_version does not increment on repeat init).
         current = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -238,17 +243,20 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
             conn.execute(
                 """
                 INSERT INTO steps (
-                    id, run_id, parent_step_id, span_kind, step_type, name, started_at,
+                    id, run_id, parent_step_id, span_kind, retry_scope, input_fingerprint,
+                    step_type, name, started_at,
                     ended_at, input_tokens, output_tokens, cached_input_tokens,
                     reasoning_tokens, provider_reported_cost_usd, cost_usd, retry_count,
                     error, error_class, redaction_mode, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     step.id,
                     step.run_id,
                     step.parent_step_id,
                     step.span_kind,
+                    step.retry_scope,
+                    step.input_fingerprint,
                     step.step_type,
                     step.name,
                     step.started_at,
@@ -370,6 +378,8 @@ def _step_from_row(row: sqlite3.Row) -> StepRecord:
         run_id=row["run_id"],
         parent_step_id=_row_get(row, "parent_step_id"),
         span_kind=_row_get(row, "span_kind"),
+        retry_scope=_row_get(row, "retry_scope"),
+        input_fingerprint=_row_get(row, "input_fingerprint"),
         cached_input_tokens=int(_row_get(row, "cached_input_tokens", 0) or 0),
         reasoning_tokens=int(_row_get(row, "reasoning_tokens", 0) or 0),
         provider_reported_cost_usd=float(_prc) if _prc is not None else None,

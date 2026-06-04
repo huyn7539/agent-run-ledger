@@ -88,3 +88,46 @@ def test_identical_run_compare_is_unchanged() -> None:
     assert comparison.latency_delta_ms == 0
     assert comparison.retry_delta == 0
     assert comparison.success_change == "unchanged"
+
+
+def test_report_retries_metric_matches_derived_prescription() -> None:
+    """HIGH regression (advisor): after collapse-on-read, report.py must read the
+    DERIVED retry view, not raw bundle.steps — else a real retry loop renders
+    'Retries: 0' while the prescription card below cites retry_count=2 (a self-
+    contradicting artifact). report + compare + detector must read ONE view."""
+    import json
+
+    from agent_run_ledger.adapters.openai import bundle_from_recorded_trace
+    from agent_run_ledger.core.prescriptions import analyze_bundle
+
+    bundle = bundle_from_recorded_trace(
+        json.loads(Path("fixtures/live_retry_loop_interleaved.json").read_text()),
+        model="gpt-4o-mini",
+    )
+    bundle = bundle.with_prescriptions(analyze_bundle(bundle))
+    assert bundle.prescriptions  # a retry loop was detected
+
+    html = render_report(bundle)
+    # the Retries metric must reflect the derived loop (>=2), not the raw 0
+    import re
+
+    m = re.search(r"Retries:</strong> (\d+)", html)
+    assert m is not None
+    assert int(m.group(1)) >= 2, "report Retries metric contradicts the prescription"
+
+
+def test_compare_retry_delta_uses_derived_view() -> None:
+    """compare.py must also read the derived view: a clean run vs a real retry
+    loop must show a non-zero retry_delta."""
+    import json
+
+    from agent_run_ledger.adapters.openai import bundle_from_recorded_trace
+
+    loop = bundle_from_recorded_trace(
+        json.loads(Path("fixtures/live_retry_loop_interleaved.json").read_text()),
+        model="gpt-4o-mini",
+    )
+    clean = load_trace(Path("fixtures/clean_run.json"))
+
+    comparison = compare_bundles(clean, loop)
+    assert comparison.retry_delta >= 2

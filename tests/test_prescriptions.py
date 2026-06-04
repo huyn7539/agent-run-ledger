@@ -144,8 +144,11 @@ def test_retry_loop_with_target_context_emits_applyable_unified_diff(tmp_path: P
 @pytest.mark.parametrize(
     ("before", "shape"),
     [
+        # AMBIGUOUS lines (more than one integer) must NOT generate a diff — ARL
+        # cannot tell which integer is the budget, so it falls back rather than
+        # risk corrupting the wrong number. (Security-hardened: the replacement is
+        # ARL-generated from the single integer; >1 integer -> refuse.)
         ("RETRIES_4 = 9", "name-collision"),
-        ("RETRIES = 40", "value-substring"),
         ("RETRY_4_LIMIT = 4", "name+value"),
     ],
 )
@@ -172,10 +175,37 @@ def test_before_replace_digit_collision_does_not_emit_wrong_diff(
 
     assert prescription.patch_type == "config_diff", shape
     assert "Non-runnable config diff" in prescription.patch
-    assert not prescription.patch.startswith("diff --git")
 
 
-def test_target_before_equals_after_falls_back_to_config_diff() -> None:
+def test_single_integer_before_generates_correct_capped_diff() -> None:
+    """A `before` line with exactly ONE integer (e.g. RETRIES = 40) is safely
+    capped to 0 by ARL — the replacement line is GENERATED, not caller-supplied,
+    so it cannot corrupt the wrong number nor carry injected text."""
+    bundle = load_trace(Path("fixtures/golden_retry_loop.json"))
+    target_step = next(step for step in bundle.steps if step.name == "demo.flaky_tool")
+    target_step = replace(
+        target_step,
+        metadata={"retry_budget_patch_target": {"path": "settings/retries.py", "before": "RETRIES = 40"}},
+    )
+    bundle = TraceBundle(
+        run=bundle.run,
+        steps=[target_step if step.id == target_step.id else step for step in bundle.steps],
+    )
+
+    prescription = analyze_bundle(bundle)[0]
+
+    assert prescription.patch_type == "unified_diff"
+    assert prescription.patch.startswith("diff --git")
+    assert "-RETRIES = 40" in prescription.patch
+    assert "+RETRIES = 0" in prescription.patch
+
+
+def test_before_already_at_cap_falls_back_to_config_diff() -> None:
+    """If the `before` line is ALREADY at the fail-closed cap (RETRIES = 0), the
+    generated `after` equals `before` -> no real change -> config_diff fallback
+    (never a no-op diff). Replaces the old caller-supplied before==after test:
+    `after` is now ARL-generated, so the only way to hit equality is a budget
+    already at the cap."""
     bundle = load_trace(Path("fixtures/golden_retry_loop.json"))
     target_step = next(step for step in bundle.steps if step.name == "demo.flaky_tool")
     target_step = replace(
@@ -183,8 +213,7 @@ def test_target_before_equals_after_falls_back_to_config_diff() -> None:
         metadata={
             "retry_budget_patch_target": {
                 "path": "settings/retries.py",
-                "before": "CRM_LOOKUP_RETRIES = 4",
-                "after": "CRM_LOOKUP_RETRIES = 4",
+                "before": "CRM_LOOKUP_RETRIES = 0",
             }
         },
     )

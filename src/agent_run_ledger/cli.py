@@ -10,8 +10,9 @@ from rich.console import Console
 from rich.table import Table
 
 from agent_run_ledger.core.compare import compare_bundles
+from agent_run_ledger.core.cost import cost_on_read
 from agent_run_ledger.core.demo import load_demo_bundle
-from agent_run_ledger.core.io import load_trace, write_trace
+from agent_run_ledger.core.io import TraceParseError, load_trace, write_trace
 from agent_run_ledger.core.models import TraceValidationError
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.report import render_comparison, write_report
@@ -113,11 +114,16 @@ def list_runs_cmd(
     table.add_column("Cost")
     table.add_column("Tokens")
     for run in rows:
+        # L7/LR2: show the cost computed on read from the FACTS, never the cached
+        # total_cost_usd (which a price-table change — or a $0 capture cache —
+        # makes stale). Load the bundle per run; linear in run count.
+        bundle = load_bundle(db, run.id)
+        run_cost = cost_on_read(bundle)
         table.add_row(
             run.id,
             run.workflow,
             run.success_label,
-            f"${run.total_cost_usd:.6f}",
+            f"${run_cost:.6f}",
             str(run.total_input_tokens + run.total_output_tokens),
         )
     console.print(table)
@@ -134,7 +140,7 @@ def _load_bundle_or_exit(db: Path, run_id: str):
 def _friendly_or_exit(action: Callable[[], T]) -> T:
     try:
         return action()
-    except (FileNotFoundError, json.JSONDecodeError, TraceValidationError) as exc:
+    except (FileNotFoundError, json.JSONDecodeError, TraceParseError, TraceValidationError) as exc:
         console.print(f"error: {exc}")
         raise typer.Exit(1) from exc
 

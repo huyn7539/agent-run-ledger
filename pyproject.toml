@@ -25,7 +25,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# scripts/ holds the shared live-capture harness (B1 gate): the SDK-driving code
+# is reused by both the demo and tests/test_live_capture_receipt.py, so both
+# exercise the SAME real-run path. It is NOT part of the shipped package.
+pythonpath = ["src", "scripts"]
 testpaths = ["tests"]
 
 [tool.ruff]

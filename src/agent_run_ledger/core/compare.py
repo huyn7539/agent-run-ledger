@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from agent_run_ledger.core.models import TraceBundle
+from agent_run_ledger.core.prescriptions import derive_retry_steps
 
 
 @dataclass(frozen=True)
@@ -30,8 +31,10 @@ class RunComparison:
 
 
 def compare_bundles(left: TraceBundle, right: TraceBundle) -> RunComparison:
-    left_retries = sum(step.retry_count for step in left.steps)
-    right_retries = sum(step.retry_count for step in right.steps)
+    # Derived retry view (collapse-on-read) — the SAME view the detector + report
+    # use, so retry_delta agrees with the prescriptions, not the raw attempts.
+    left_retries = sum(step.retry_count for step in derive_retry_steps(left))
+    right_retries = sum(step.retry_count for step in derive_retry_steps(right))
     success_change = (
         "unchanged"
         if left.run.success_label == right.run.success_label
