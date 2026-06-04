@@ -123,6 +123,22 @@ def test_receipt_grades_l1_when_artifact_is_nonrunnable_fallback() -> None:
     assert r.repair_artifact["patch_type"] == "config_diff"
 
 
+def test_l1_claim_does_not_promise_applyability() -> None:
+    """The L1 (config_diff fallback) artifact is NON-runnable — it has no file/line
+    target, so it is NOT an applyable patch. The claim must convey direction-relevance
+    only and must NOT say the repair is 'applyable' (which would contradict the
+    receipt's own limits/next_evidence)."""
+    _, receipts = _receipts_for(_loop_trace(patch_target=None))
+    r = receipts[0]
+    assert r.proof_level == "L1"
+    claim = r.claim.lower()
+    # the discriminating assertion: a non-runnable config_diff is not applyable
+    assert "applyable" not in claim
+    # ... but it IS direction-relevant, and mechanical removal is NOT established
+    assert "relevant" in claim
+    assert "not established" in claim
+
+
 def test_proof_level_is_from_the_closed_ladder() -> None:
     _, receipts = _receipts_for(_loop_trace(patch_target=_PATCH_TARGET))
     assert receipts[0].proof_level in PROOF_LEVELS

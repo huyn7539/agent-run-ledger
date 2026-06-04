@@ -241,8 +241,9 @@ def _claim(proof_level: str) -> str:
         )
     if proof_level == "L1":
         return (
-            "This repair is relevant to the observed retry loop and is applyable "
-            "(relevance only; mechanical removal not established)."
+            "This repair direction is relevant to the observed retry loop, but "
+            "mechanical removal is not established (relevance only; the "
+            "config_diff fallback carries no file/line target to apply)."
         )
     return "ARL found a likely retry loop; no accepted fix (diagnostic)."
 
