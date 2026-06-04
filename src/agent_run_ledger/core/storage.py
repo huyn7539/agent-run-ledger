@@ -1,25 +1,96 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
-from agent_run_ledger.core.models import PrescriptionRecord, RunRecord, StepRecord, TraceBundle
+from agent_run_ledger.core.models import (
+    SCHEMA_VERSION,
+    PrescriptionRecord,
+    RunRecord,
+    StepRecord,
+    TraceBundle,
+)
+
+# L11: directory names whose presence in a ledger path means a cloud-sync daemon
+# (Dropbox / OneDrive / iCloud) may egress plaintext to a vendor cloud — defeating
+# zero-egress not via ARL's code but via where the file lives. We WARN, not block.
+_CLOUD_SYNC_MARKERS = ("Dropbox", "OneDrive", "Mobile Documents")
+
+
+def cloud_sync_warning(db_path: Path | str) -> str | None:
+    """Return a one-time warning string if *db_path* resolves inside a known
+    cloud-sync directory, else None (L11). Pure function — caller decides how to
+    surface it (the CLI prints it once)."""
+    parts = set(Path(db_path).expanduser().parts)
+    for marker in _CLOUD_SYNC_MARKERS:
+        if marker in parts:
+            return (
+                f"warning: ledger path is inside a cloud-sync directory ({marker}). "
+                "Local-first / zero-egress can be defeated by a sync daemon "
+                "uploading plaintext. Move .arl outside synced folders, or accept "
+                "that your provider's cloud will hold a copy."
+            )
+    return None
+
+
+def _set_file_permissions(path: Path) -> None:
+    """Lock the ledger dir to 0o700 and the file to 0o600 on POSIX (L11).
+
+    Windows POSIX modes are a no-op (the cloud-sync warning covers that case).
+    Best-effort: a chmod failure must never break a save."""
+    if os.name != "posix":
+        return
+    try:
+        os.chmod(path.parent, 0o700)
+        if path.exists():
+            os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    # PRAGMA foreign_keys must be issued immediately after connect, before any
+    # DML — it is a silent no-op inside an open transaction (ADR-001 C4). This
+    # is what makes ON DELETE CASCADE and orphan-step rejection actually fire.
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
     return conn
 
 
+# The DDL/migration version stamped on the FILE via PRAGMA user_version —
+# "which additive DDL migrations has this file had" (distinct from the per-row
+# schema_version, which records the shape an individual record was written
+# under). Bump this and append an `_ensure_column` for any additive change.
+USER_VERSION = 1
+
+
+class RunAlreadyRecorded(Exception):
+    """Raised when a run id already exists — fact tables are append-only (L2).
+
+    The base (runs, steps) is never deleted or overwritten, so a provenance hash
+    computed over a row stays valid forever. Re-capture, if ever supported, is a
+    NEW immutable row — never a rewrite of the existing one.
+    """
+
+
 def init_db(db_path: Path) -> None:
+    """Create tables at the latest DDL and run additive migrations (idempotent).
+
+    A brand-new file is created at the latest shape and stamped at
+    ``USER_VERSION``. An existing older file gains any missing columns via
+    ``_ensure_column`` (additive ALTER, no row rewrite) and is re-stamped. The
+    ALTERs are no-ops on an already-current file (Rule 5 idempotency).
+    """
     with connect(db_path) as conn:
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS runs (
                 id TEXT PRIMARY KEY,
+                schema_version TEXT NOT NULL DEFAULT '0.1',
                 workflow TEXT NOT NULL,
                 framework TEXT NOT NULL,
                 provider TEXT NOT NULL,
@@ -32,21 +103,34 @@ def init_db(db_path: Path) -> None:
                 total_cost_usd REAL NOT NULL,
                 total_latency_ms INTEGER NOT NULL,
                 total_input_tokens INTEGER NOT NULL,
-                total_output_tokens INTEGER NOT NULL
+                total_output_tokens INTEGER NOT NULL,
+                ingested_at TEXT NOT NULL DEFAULT '',
+                billing_mode TEXT NOT NULL DEFAULT 'unknown'
+                    CHECK (billing_mode IN
+                        ('pay_per_use','subscription','enterprise_contract','local','unknown')),
+                price_table_version TEXT,
+                provenance_hash TEXT,
+                outcome_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS steps (
                 id TEXT NOT NULL,
                 run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                parent_step_id TEXT,
+                span_kind TEXT,
                 step_type TEXT NOT NULL,
                 name TEXT NOT NULL,
                 started_at TEXT NOT NULL,
                 ended_at TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL,
                 output_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                provider_reported_cost_usd REAL,
                 cost_usd REAL NOT NULL,
                 retry_count INTEGER NOT NULL,
                 error TEXT,
+                error_class TEXT,
                 redaction_mode TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
                 PRIMARY KEY (run_id, id)
@@ -77,24 +161,59 @@ def init_db(db_path: Path) -> None:
                 "(patch_type IN ('unified_diff', 'code_snippet', 'config_diff', 'regression_test'))"
             ),
         )
+        # L1/L2/L7 additive migration: bring a pre-LOCK-NOW table up to shape.
+        # No-op on a file already created with the columns (IF NOT EXISTS above).
+        # ALTER ADD COLUMN cannot carry a CHECK constraint, so billing_mode's
+        # enum is enforced at the model layer (RunRecord.__post_init__); the CHECK
+        # in the CREATE is belt-and-suspenders for fresh DBs.
+        _ensure_column(conn, "runs", "schema_version", "TEXT NOT NULL DEFAULT '0.1'")
+        _ensure_column(conn, "runs", "ingested_at", "TEXT NOT NULL DEFAULT ''")
+        _ensure_column(conn, "runs", "billing_mode", "TEXT NOT NULL DEFAULT 'unknown'")
+        _ensure_column(conn, "runs", "price_table_version", "TEXT")
+        _ensure_column(conn, "runs", "provenance_hash", "TEXT")
+        _ensure_column(conn, "runs", "outcome_json", "TEXT")
+        _ensure_column(conn, "steps", "cached_input_tokens", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "steps", "reasoning_tokens", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(conn, "steps", "provider_reported_cost_usd", "REAL")
+        _ensure_column(conn, "steps", "parent_step_id", "TEXT")
+        _ensure_column(conn, "steps", "span_kind", "TEXT")
+        _ensure_column(conn, "steps", "error_class", "TEXT")
+        # Stamp the file's DDL version. Stays put once at USER_VERSION (no DDL on
+        # the hot path → user_version does not increment on repeat init).
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current < USER_VERSION:
+            conn.execute(f"PRAGMA user_version = {USER_VERSION}")
+    # L11: lock the dir/file down once the file exists on disk.
+    _set_file_permissions(Path(db_path))
 
 
 def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
+    """Persist a bundle. Fact tables (runs, steps) are INSERT-ONLY (L2).
+
+    A duplicate ``run.id`` raises ``RunAlreadyRecorded`` and nothing is written —
+    base rows are never deleted or overwritten. Only the recomputable judgment
+    side (``prescriptions``) is replaced per-run.
+    """
     bundle.validate()
     init_db(db_path)
     with connect(db_path) as conn:
-        conn.execute("DELETE FROM prescriptions WHERE run_id = ?", (bundle.run.id,))
-        conn.execute("DELETE FROM steps WHERE run_id = ?", (bundle.run.id,))
+        existing = conn.execute(
+            "SELECT 1 FROM runs WHERE id = ?", (bundle.run.id,)
+        ).fetchone()
+        if existing is not None:
+            raise RunAlreadyRecorded(f"run already recorded: {bundle.run.id!r}")
         conn.execute(
             """
-            INSERT OR REPLACE INTO runs (
-                id, workflow, framework, provider, model, started_at, ended_at, success_label,
-                prompt_hash, config_hash, total_cost_usd, total_latency_ms,
-                total_input_tokens, total_output_tokens
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO runs (
+                id, schema_version, workflow, framework, provider, model, started_at,
+                ended_at, success_label, prompt_hash, config_hash, total_cost_usd,
+                total_latency_ms, total_input_tokens, total_output_tokens, ingested_at,
+                billing_mode, price_table_version, provenance_hash, outcome_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 bundle.run.id,
+                bundle.run.schema_version,
                 bundle.run.workflow,
                 bundle.run.framework,
                 bundle.run.provider,
@@ -108,32 +227,49 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
                 bundle.run.total_latency_ms,
                 bundle.run.total_input_tokens,
                 bundle.run.total_output_tokens,
+                bundle.ingested_at,
+                bundle.run.billing_mode,
+                bundle.run.price_table_version,
+                bundle.run.provenance_hash,
+                bundle.run.outcome_json,
             ),
         )
         for step in bundle.steps:
             conn.execute(
                 """
                 INSERT INTO steps (
-                    id, run_id, step_type, name, started_at, ended_at, input_tokens,
-                    output_tokens, cost_usd, retry_count, error, redaction_mode, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, run_id, parent_step_id, span_kind, step_type, name, started_at,
+                    ended_at, input_tokens, output_tokens, cached_input_tokens,
+                    reasoning_tokens, provider_reported_cost_usd, cost_usd, retry_count,
+                    error, error_class, redaction_mode, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     step.id,
                     step.run_id,
+                    step.parent_step_id,
+                    step.span_kind,
                     step.step_type,
                     step.name,
                     step.started_at,
                     step.ended_at,
                     step.input_tokens,
                     step.output_tokens,
+                    step.cached_input_tokens,
+                    step.reasoning_tokens,
+                    step.provider_reported_cost_usd,
                     step.cost_usd,
                     step.retry_count,
                     step.error,
+                    step.error_class,
                     step.redaction_mode,
                     json.dumps(step.metadata, sort_keys=True),
                 ),
             )
+        # Prescriptions are the recomputable judgment side — safe to replace
+        # per-run (the new run inserted above had no prior prescriptions, so this
+        # is a no-op on first save; it matters only on a re-analyze path).
+        conn.execute("DELETE FROM prescriptions WHERE run_id = ?", (bundle.run.id,))
         for prescription in bundle.prescriptions:
             conn.execute(
                 """
@@ -155,6 +291,8 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
                     prescription.regression_test_template,
                 ),
             )
+    # L11: re-assert tight perms after writing the bundle.
+    _set_file_permissions(Path(db_path))
     return bundle.run.id
 
 
@@ -173,7 +311,13 @@ def load_bundle(db_path: Path, run_id: str) -> TraceBundle:
     run = _run_from_row(run_row)
     steps = [_step_from_row(row) for row in step_rows]
     prescriptions = [_prescription_from_row(row) for row in prescription_rows]
-    bundle = TraceBundle(run=run, steps=steps, prescriptions=prescriptions)
+    bundle = TraceBundle(
+        run=run,
+        steps=steps,
+        prescriptions=prescriptions,
+        schema_version=run.schema_version,
+        ingested_at=_row_get(run_row, "ingested_at", ""),
+    )
     bundle.validate()
     return bundle
 
@@ -186,9 +330,19 @@ def list_runs(db_path: Path) -> list[RunRecord]:
     return [_run_from_row(row) for row in rows]
 
 
+def _row_get(row: sqlite3.Row, key: str, default=None):
+    """Read *key* from a Row, returning *default* if the column is absent.
+
+    Lets the loader tolerate a row written under an older shape in a mixed-
+    version file (L1) without raising on a missing column.
+    """
+    return row[key] if key in row.keys() else default
+
+
 def _run_from_row(row: sqlite3.Row) -> RunRecord:
     return RunRecord(
         id=row["id"],
+        schema_version=_row_get(row, "schema_version", SCHEMA_VERSION),
         workflow=row["workflow"],
         framework=row["framework"],
         provider=row["provider"],
@@ -202,13 +356,23 @@ def _run_from_row(row: sqlite3.Row) -> RunRecord:
         total_latency_ms=int(row["total_latency_ms"]),
         total_input_tokens=int(row["total_input_tokens"]),
         total_output_tokens=int(row["total_output_tokens"]),
+        billing_mode=_row_get(row, "billing_mode", "unknown") or "unknown",
+        price_table_version=_row_get(row, "price_table_version"),
+        provenance_hash=_row_get(row, "provenance_hash"),
+        outcome_json=_row_get(row, "outcome_json"),
     )
 
 
 def _step_from_row(row: sqlite3.Row) -> StepRecord:
+    _prc = _row_get(row, "provider_reported_cost_usd")
     return StepRecord(
         id=row["id"],
         run_id=row["run_id"],
+        parent_step_id=_row_get(row, "parent_step_id"),
+        span_kind=_row_get(row, "span_kind"),
+        cached_input_tokens=int(_row_get(row, "cached_input_tokens", 0) or 0),
+        reasoning_tokens=int(_row_get(row, "reasoning_tokens", 0) or 0),
+        provider_reported_cost_usd=float(_prc) if _prc is not None else None,
         step_type=row["step_type"],
         name=row["name"],
         started_at=row["started_at"],
@@ -218,6 +382,7 @@ def _step_from_row(row: sqlite3.Row) -> StepRecord:
         cost_usd=float(row["cost_usd"]),
         retry_count=int(row["retry_count"]),
         error=row["error"],
+        error_class=_row_get(row, "error_class"),
         redaction_mode=row["redaction_mode"],
         metadata=json.loads(row["metadata_json"]),
     )

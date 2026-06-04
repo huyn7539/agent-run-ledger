@@ -9,8 +9,8 @@
     "started_at": "2026-05-28T14:00:00Z",
     "ended_at": "2026-05-28T14:00:42Z",
     "success_label": "failed",
-    "prompt_hash": "prompt_retry_loop_v1",
-    "config_hash": "config_retry_5",
+    "prompt_hash": "5e7f042f4203ed8092e33b77b8f7e52f0d64b46769b9ac18c3a892000697ca39",
+    "config_hash": "ae7aa47355c7946aa6dda2ebe073765f6f7e83782291882c54a7afb40c96b5f7",
     "total_cost_usd": 0.1842,
     "total_latency_ms": 42000,
     "total_input_tokens": 4200,
@@ -31,7 +31,7 @@
     {
       "id": "step_2",
       "type": "tool",
-      "name": "crm.lookup_customer",
+      "name": "demo.flaky_tool",
       "started_at": "2026-05-28T14:00:08Z",
       "ended_at": "2026-05-28T14:00:34Z",
       "token_usage": { "input": 1400, "output": 800 },
@@ -40,7 +40,7 @@
       "error": "TimeoutError: CRM lookup exceeded 5s timeout",
       "redaction_mode": "metadata_only",
       "metadata": {
-        "tool_name": "crm.lookup_customer",
+        "tool_name": "demo.flaky_tool",
         "timeout_ms": 5000
       }
     },

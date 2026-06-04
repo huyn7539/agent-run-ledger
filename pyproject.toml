@@ -13,6 +13,9 @@ dependencies = [
 openai = [
   "openai-agents>=0.0.0",
 ]
+dev = [
+  "pytest>=8",
+]
 
 [project.scripts]
 arl = "agent_run_ledger.cli:app"
@@ -28,4 +31,3 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-

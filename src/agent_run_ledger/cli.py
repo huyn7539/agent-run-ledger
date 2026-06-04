@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Callable, TypeVar
 
 import typer
 from rich.console import Console
@@ -10,20 +12,36 @@ from rich.table import Table
 from agent_run_ledger.core.compare import compare_bundles
 from agent_run_ledger.core.demo import load_demo_bundle
 from agent_run_ledger.core.io import load_trace, write_trace
+from agent_run_ledger.core.models import TraceValidationError
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.report import render_comparison, write_report
-from agent_run_ledger.core.storage import init_db, list_runs, load_bundle, save_bundle
+from agent_run_ledger.core.storage import (
+    cloud_sync_warning,
+    init_db,
+    list_runs,
+    load_bundle,
+    save_bundle,
+)
 
 app = typer.Typer(help="Agent Run Ledger CLI")
 console = Console()
+T = TypeVar("T")
 
 
 def default_db() -> Path:
     return Path(os.environ.get("ARL_DB", ".arl/ledger.sqlite"))
 
 
+def _warn_cloud_sync(db: Path) -> None:
+    """L11: print a one-time warning if the ledger lives in a cloud-sync dir."""
+    warning = cloud_sync_warning(db)
+    if warning:
+        console.print(f"[yellow]{warning}[/yellow]")
+
+
 @app.command("init")
 def init(db: Path = typer.Option(default_factory=default_db, help="SQLite database path.")) -> None:
+    _warn_cloud_sync(db)
     init_db(db)
     console.print(f"initialized ledger: {db}")
 
@@ -44,9 +62,9 @@ def import_trace(
     path: Path = typer.Argument(..., help="Trace JSON file."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
-    bundle = load_trace(path)
+    bundle = _friendly_or_exit(lambda: load_trace(path))
     bundle = bundle.with_prescriptions(analyze_bundle(bundle))
-    run_id = save_bundle(db, bundle)
+    run_id = _friendly_or_exit(lambda: save_bundle(db, bundle))
     console.print(f"imported run: {run_id}")
 
 
@@ -57,7 +75,7 @@ def export_trace(
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
     bundle = _load_bundle_or_exit(db, run)
-    write_trace(bundle, out)
+    _friendly_or_exit(lambda: write_trace(bundle, out))
     console.print(f"wrote trace: {out}")
 
 
@@ -69,7 +87,7 @@ def report(
 ) -> None:
     bundle = _load_bundle_or_exit(db, run)
     output = out or Path(".arl") / "reports" / f"{run}.html"
-    write_report(bundle, output)
+    _friendly_or_exit(lambda: write_report(bundle, output))
     console.print(f"wrote report: {output}")
 
 
@@ -110,6 +128,14 @@ def _load_bundle_or_exit(db: Path, run_id: str):
         return load_bundle(db, run_id)
     except KeyError as exc:
         console.print(f"error: {exc.args[0]}")
+        raise typer.Exit(1) from exc
+
+
+def _friendly_or_exit(action: Callable[[], T]) -> T:
+    try:
+        return action()
+    except (FileNotFoundError, json.JSONDecodeError, TraceValidationError) as exc:
+        console.print(f"error: {exc}")
         raise typer.Exit(1) from exc
 
 

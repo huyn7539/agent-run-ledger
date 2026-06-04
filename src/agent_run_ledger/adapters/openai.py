@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from agent_run_ledger.core.models import RunRecord, StepRecord, TraceBundle, utc_now_iso
+from agent_run_ledger.core.models import (
+    RunRecord,
+    StepRecord,
+    TraceBundle,
+    classify_error,
+    utc_now_iso,
+)
 from agent_run_ledger.core.prescriptions import analyze_bundle
+from agent_run_ledger.core.provenance import compute_provenance_hash
 from agent_run_ledger.core.storage import save_bundle
-
-_REDACTED = "[redacted]"
-_REDACTED_METADATA_KEYS = {"input", "output"}
-
 
 class NoSpansCapturedError(RuntimeError):
     """Raised when the OpenAI trace processor finishes without any spans."""
@@ -76,10 +80,23 @@ class OpenAILedgerTraceProcessor:
             total_cost += cost
             total_input += usage[0]
             total_output += usage[1]
+            span_kind = (
+                span_data.get("type") or span.get("type") or span.get("span_type")
+            )
+            parent_id = (
+                span.get("parent_id")
+                or span.get("parent_span_id")
+                or span_data.get("parent_id")
+            )
+            reported_cost = _extract_reported_cost(span)
+            raw_error = _extract_error(span)
             steps.append(
                 StepRecord(
                     id=str(span.get("span_id") or span.get("id") or f"span_{idx}"),
                     run_id=self._trace_id,
+                    # L4: preserve the call-graph edge + OTEL-aligned span kind.
+                    parent_step_id=str(parent_id) if parent_id is not None else None,
+                    span_kind=str(span_kind) if span_kind is not None else None,
                     step_type=str(
                         span_data.get("type")
                         or span.get("type")
@@ -96,9 +113,17 @@ class OpenAILedgerTraceProcessor:
                     ended_at=str(span.get("ended_at") or span.get("end_time") or utc_now_iso()),
                     input_tokens=usage[0],
                     output_tokens=usage[1],
+                    # L7: the span-reported cost is a FACT (provider_reported_cost_usd),
+                    # NOT authoritative for display — cost_on_read decides that. We keep
+                    # cost_usd as the cache so existing read paths still work.
+                    provider_reported_cost_usd=reported_cost,
                     cost_usd=cost,
                     retry_count=retry_count,
-                    error=_extract_error(span),
+                    error=raw_error,
+                    # L8: derive the bounded error_class at the chokepoint; the
+                    # raw message is dropped (classify_error inspects only the
+                    # class token) and `error` itself is redacted at construction.
+                    error_class=classify_error(raw_error),
                     redaction_mode="metadata_only",
                     metadata=_safe_metadata(span),
                 )
@@ -116,7 +141,10 @@ class OpenAILedgerTraceProcessor:
             total_input_tokens=total_input,
             total_output_tokens=total_output,
         )
-        return TraceBundle(run=run, steps=steps)
+        bundle = TraceBundle(run=run, steps=steps)
+        # L5: stamp the provenance hash LOCALLY at capture — the un-backfillable
+        # seed of proof-of-real. Computed over immutable facts only (no cost).
+        return replace(bundle, run=replace(run, provenance_hash=compute_provenance_hash(bundle)))
 
 
 def make_trace_processor(db_path: Path, workflow: str = "openai-agent-workflow") -> OpenAILedgerTraceProcessor:
@@ -199,6 +227,18 @@ def _extract_cost(span: dict[str, Any]) -> float:
     return float(value)
 
 
+def _extract_reported_cost(span: dict[str, Any]) -> float | None:
+    """Return the provider-reported cost FACT, or None if the span did not
+    report one (L7). Distinct from ``_extract_cost`` (which coalesces to 0.0):
+    None must mean "not reported", so cost_on_read can fall back to tokens."""
+    custom_data = _extract_custom_data(span)
+    if span.get("cost_usd") is not None:
+        return float(span["cost_usd"])
+    if custom_data.get("cost_usd") is not None:
+        return float(custom_data["cost_usd"])
+    return None
+
+
 def _extract_retry_count(span: dict[str, Any]) -> int:
     custom_data = _extract_custom_data(span)
     value = span.get("retry_count") or custom_data.get("retry_count") or 0
@@ -221,20 +261,5 @@ def _extract_error(span: dict[str, Any]) -> str | None:
 
 
 def _safe_metadata(span: dict[str, Any]) -> dict[str, Any]:
-    redacted = _redact_sensitive_metadata(span)
-    return redacted if isinstance(redacted, dict) else {}
-
-
-def _redact_sensitive_metadata(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): _REDACTED
-            if str(key).lower() in _REDACTED_METADATA_KEYS
-            else _redact_sensitive_metadata(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_sensitive_metadata(item) for item in value]
-    if isinstance(value, tuple):
-        return [_redact_sensitive_metadata(item) for item in value]
-    return value
+    metadata = _extract_custom_data(span)
+    return metadata if isinstance(metadata, dict) else {}

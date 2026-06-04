@@ -40,7 +40,10 @@ def _retry_loop_prescription(
     return PrescriptionRecord(
         id=f"rx_{uuid4().hex[:12]}",
         run_id=bundle.run.id,
-        severity="high" if step.error else "medium",
+        # L8: severity reads the typed error_class (the bounded fact the wedge
+        # needs), not the always-redacted `error` string. A captured error class
+        # means the retry loop ended in a real failure -> high severity.
+        severity="high" if step.error_class else "medium",
         root_cause=(
             f"{step.name} made {step.retry_count} additional attempts after the first "
             f"in one run ({1 + step.retry_count} total attempts)"
@@ -51,7 +54,7 @@ def _retry_loop_prescription(
             f"retry_count={step.retry_count} additional attempts",
             f"total_attempts={1 + step.retry_count}",
             f"step_cost_usd={step.cost_usd:.6f}",
-            f"step_error={step.error or 'none'}",
+            f"step_error_class={step.error_class or 'none'}",
             "cost_estimate=uniform-per-attempt approximation",
         ],
         patch_type=patch_type,
@@ -97,8 +100,6 @@ def _retry_budget_patch_target(step: StepRecord, allowed_retries: int) -> dict[s
         or raw_target.get("replacement_line")
         or raw_target.get("replacement_text")
     )
-    if before and not after:
-        after = before.replace(str(step.retry_count), str(allowed_retries), 1)
     if not path or not before or not after or before == after:
         return None
     return {"path": path, "before": before, "after": after}

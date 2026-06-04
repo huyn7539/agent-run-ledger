@@ -40,13 +40,13 @@
       "ended_at": "2026-05-28T15:00:12Z",
       "span_data": {
         "type": "custom",
-        "name": "crm.lookup_customer",
+        "name": "demo.flaky_tool",
         "data": {
           "arl_step_type": "tool",
           "retry_count": 3,
           "cost_usd": 0.04,
           "error": "TimeoutError: CRM lookup exceeded 5s timeout",
-          "tool_name": "crm.lookup_customer"
+          "tool_name": "demo.flaky_tool"
         }
       }
     }
