@@ -224,6 +224,42 @@ def test_missing_turn_id_abstains_rather_than_false_collapse() -> None:
     assert collapse_retry_groups(attempts) == [[0], [1], [2]]
 
 
+def test_mixed_turn_group_with_a_same_turn_duplicate_does_not_collapse() -> None:
+    """B3 RE-VERDICT NEGATIVE (vault-CC 2026-06-04): a MIXED group that contains a
+    same-turn duplicate must NOT collapse. The old guard only proved ">1 distinct
+    turn exists", so [t1,t2,t2] and [t1,t1,t2] slipped through — a same-turn fan-out
+    duplicate rode along with a real cross-turn attempt and the WHOLE group
+    false-collapsed into a retry loop. A genuine agentic retry is ONE attempt per
+    distinct turn; any turn contributing two same-input attempts is fan-out, and the
+    module's own invariant (every tie resolves toward NOT collapsing) requires
+    abstaining. Both mixed shapes -> singletons (ZERO collapse)."""
+    mixed_dup_tail = [
+        _attempt(0, turn_id="turn_1", has_error=True, error_class="Timeout"),
+        _attempt(1, turn_id="turn_2", has_error=False, error_class=None),
+        _attempt(2, turn_id="turn_2", has_error=False, error_class=None),
+    ]
+    assert collapse_retry_groups(mixed_dup_tail) == [[0], [1], [2]]
+
+    mixed_dup_head = [
+        _attempt(0, turn_id="turn_1", has_error=True, error_class="Timeout"),
+        _attempt(1, turn_id="turn_1", has_error=False, error_class=None),
+        _attempt(2, turn_id="turn_2", has_error=False, error_class=None),
+    ]
+    assert collapse_retry_groups(mixed_dup_head) == [[0], [1], [2]]
+
+
+def test_one_attempt_per_distinct_turn_is_required_for_a_loop() -> None:
+    """B3 RE-VERDICT POSITIVE: the genuine cross-turn loop is exactly ONE attempt per
+    distinct turn ([t1,t2,t3]) — it still collapses. This pins the corrected
+    predicate: distinct-AND-complete turn coverage, not merely >1 turn present."""
+    attempts = [
+        _attempt(0, turn_id="turn_1"),
+        _attempt(1, turn_id="turn_2"),
+        _attempt(2, turn_id="turn_3"),
+    ]
+    assert collapse_retry_groups(attempts) == [[0, 1, 2]]
+
+
 # --- adapter + on-read end-to-end: real span shape -> derived retry_count ------
 
 # The REAL SDK function-tool SpanError shape (tool.py:1428): message is a generic
@@ -339,6 +375,27 @@ def test_adapter_does_not_derive_retry_for_same_turn_fanout() -> None:
             _function_span("s1", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
             _function_span("s2", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", error=None),
             _function_span("s3", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", error=None),
+        ]),
+        model="gpt-4o-mini",
+    )
+    assert analyze_bundle(bundle) == []
+
+
+def test_adapter_does_not_derive_retry_for_mixed_turn_with_same_turn_duplicate() -> None:
+    """END-TO-END B3 RE-VERDICT NEGATIVE (vault-CC 2026-06-04): a MIXED trace where
+    one turn emits a same-input duplicate alongside a real cross-turn attempt
+    (turn_1 -> fn; turn_2 -> fn, fn) must emit ZERO prescriptions. >1 distinct turn
+    is present, but a turn contributes two attempts, so this is fan-out riding a
+    cross-turn attempt — not a genuine retry loop. The prior fix (>1 distinct turn)
+    let this through; the corrected one-attempt-per-turn predicate rejects it."""
+    same = "lookup customer 42"
+    bundle = bundle_from_recorded_trace(
+        _trace([
+            _turn_span("turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z"),
+            _function_span("s1", tool_input=same, parent_id="turn_1", started_at="2026-05-31T10:00:00Z", ended_at="2026-05-31T10:00:02Z", error=_TOOL_ERROR),
+            _turn_span("turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:06Z"),
+            _function_span("s2", tool_input=same, parent_id="turn_2", started_at="2026-05-31T10:00:02Z", ended_at="2026-05-31T10:00:04Z", error=None),
+            _function_span("s3", tool_input=same, parent_id="turn_2", started_at="2026-05-31T10:00:04Z", ended_at="2026-05-31T10:00:06Z", error=None),
         ]),
         model="gpt-4o-mini",
     )

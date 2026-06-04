@@ -40,12 +40,14 @@ class AttemptFacts:
     no recoverable content.
 
     ``turn_id`` is the IMMEDIATE parent span id (the per-turn ``turn_span`` for a
-    real SDK function call). A genuine agentic retry loop spans MULTIPLE turns, so
-    the immediate parent DIFFERS between attempts even though ``retry_scope`` (the
-    agent ancestor) is stable. The grouper uses this to reject a SAME-TURN
-    sequential fan-out (3 calls in one turn) that would otherwise look identical to
-    a retry under scope+name+input alone (NEW-4 false-positive guard, B3). None
-    when no immediate parent was captured.
+    real SDK function call). A genuine agentic retry loop is ONE attempt per DISTINCT
+    turn: each retry interleaves a fresh turn, so every attempt has its own distinct
+    immediate parent even though ``retry_scope`` (the agent ancestor) is stable. The
+    grouper requires that one-attempt-per-distinct-turn shape, which rejects a
+    SAME-TURN fan-out — PURE (3 calls in one turn) OR MIXED (a same-turn duplicate
+    riding alongside a real cross-turn attempt, e.g. ``[t1,t2,t2]``) — that would
+    otherwise look identical to a retry under scope+name+input alone (NEW-4
+    false-positive guard, B3). None when no immediate parent was captured.
     """
 
     index: int
@@ -99,12 +101,29 @@ def _is_retry_continuation(prev: AttemptFacts, cur: AttemptFacts) -> bool:
     return True
 
 
-def _spans_multiple_turns(group: list[AttemptFacts]) -> bool:
-    """True iff the attempts in *group* span MORE THAN ONE distinct turn (immediate
-    parent). A genuine cross-turn retry has a different turn parent per attempt; a
-    same-turn fan-out shares one. Missing turn ids collapse to a single ``{None}``
-    set -> False, so unknown structure ABSTAINS (never a false positive)."""
-    return len({a.turn_id for a in group}) > 1
+def _is_one_attempt_per_distinct_turn(group: list[AttemptFacts]) -> bool:
+    """True iff *group* is a genuine cross-turn retry: ONE attempt per DISTINCT turn,
+    across more than one turn.
+
+    A real agentic retry interleaves a fresh turn before each retry, so each attempt
+    has its OWN distinct turn (immediate) parent. Three conditions, ALL required:
+      * every attempt has a captured turn id (a missing id -> unknown structure ->
+        ABSTAIN, never a false positive);
+      * the turn ids are ALL DISTINCT (no turn contributes two attempts) — this is
+        the load-bearing check the prior ``len(set) > 1`` guard MISSED: a MIXED group
+        like ``[t1, t2, t2]`` or ``[t1, t1, t2]`` has >1 distinct turn yet hides a
+        SAME-TURN duplicate (fan-out), which the module's own invariant
+        (``retries.py`` header: every tie resolves toward NOT collapsing) forbids
+        collapsing;
+      * more than one turn (a single turn is fan-out, not a loop).
+
+    Equivalent to "all turn ids present AND no duplicate turn id AND >1 attempt"."""
+    turn_ids = [a.turn_id for a in group]
+    return (
+        all(t is not None for t in turn_ids)
+        and len(set(turn_ids)) == len(turn_ids)
+        and len(turn_ids) > 1
+    )
 
 
 def collapse_retry_groups(attempts: list[AttemptFacts]) -> list[list[int]]:
@@ -117,9 +136,12 @@ def collapse_retry_groups(attempts: list[AttemptFacts]) -> list[list[int]]:
     its own singleton). Only a DIFFERENT tool between attempts is real interleaved
     work that breaks the run.
 
-    Returns groups of original ``index`` values, in order. A tool group of length
-    >= 2 with at least one error is a retry loop; everything else stays a
-    singleton. Callers sort attempts deterministically (by ``(started_at, index)``)
+    Returns groups of original ``index`` values, in order. A tool group is a retry
+    loop only if it has >= 2 attempts, at least one error, AND is one attempt per
+    DISTINCT turn (``_is_one_attempt_per_distinct_turn`` — every attempt under its
+    own distinct turn parent); everything else (pure or mixed same-turn duplicates,
+    all-success runs, missing turn ids) stays a singleton. Callers sort attempts
+    deterministically (by ``(started_at, index)``)
     before calling — this function trusts the given order for adjacency.
     """
     if not attempts:
@@ -151,18 +173,19 @@ def collapse_retry_groups(attempts: list[AttemptFacts]) -> list[list[int]]:
         # A multi-attempt tool run is a RETRY loop only if BOTH hold:
         #   1. at least one attempt FAILED — a repeated-same-input all-success run
         #      (idempotent re-fetch) is not a loop.
-        #   2. it spans MORE THAN ONE turn (B3 / NEW-4): a genuine agentic retry
-        #      interleaves a model turn before each retry, so the attempts have
-        #      DIFFERENT immediate (turn) parents. A SAME-TURN sequential fan-out
-        #      (>=2 same-input calls in ONE turn, e.g. the model emitting several
-        #      tool calls at once) shares one turn parent and is NOT a retry loop —
-        #      flagging it would tell a builder "you have a retry loop" when they
-        #      do not. Abstain (conservative false-negative) when turn ids are
+        #   2. it is ONE attempt per DISTINCT turn across >1 turn (B3 / NEW-4): a
+        #      genuine agentic retry interleaves a fresh turn before each retry, so
+        #      every attempt has its OWN distinct turn (immediate) parent. A SAME-TURN
+        #      duplicate — whether a PURE fan-out ([t1,t1,t1]) or a MIXED group that
+        #      smuggles a same-turn duplicate alongside a real cross-turn attempt
+        #      ([t1,t2,t2], [t1,t1,t2]) — is NOT a retry loop; flagging it would tell
+        #      a builder "you have a retry loop" when they do not (vault-CC re-verdict
+        #      2026-06-04). Abstain (conservative false-negative) when any turn id is
         #      missing, so we never falsely collapse on unknown structure.
         if (
             len(group) >= 2
             and any(a.has_error for a in group)
-            and _spans_multiple_turns(group)
+            and _is_one_attempt_per_distinct_turn(group)
         ):
             result.append([a.index for a in group])
         else:
