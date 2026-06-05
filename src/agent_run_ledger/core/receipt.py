@@ -19,9 +19,18 @@ Grade honesty rules:
     regression-to-the-mean caveat (ARL fires on the worst runs, which partly
     self-correct) and any model fact supplied by the app.
 
-This module is provider-neutral and content-free: it reads only bounded facts and
-the already-redacted prescription evidence. It introduces NO new egress channel
-content beyond bounded labels/numbers.
+This module is provider-neutral. The DETECTION and GRADING facts it computes are
+content-free: the claim, proof level, confidence, limits, next_evidence, and the
+evidence list read only bounded labels/numbers from the already-redacted
+prescription. Those fields introduce NO new egress channel content.
+
+ONE field is NOT content-free: ``repair_artifact.patch`` (and the app-supplied
+allowed-metadata ``before`` / ``path`` / ``after`` values it is built from) MAY
+carry local file paths and source-line content — the unified_diff embeds the real
+``before`` line and the repo-relative ``path``. So a receipt is safe to surface
+locally, but ``repair_artifact.patch`` is NOT remote-egress-safe until the Task 46
+allowed-metadata value scrub redacts those before/path/after values. Treat the
+patch as local-only output, not a bounded label, when forwarding off-box.
 """
 
 from __future__ import annotations
