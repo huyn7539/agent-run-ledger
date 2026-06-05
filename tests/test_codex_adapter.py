@@ -342,3 +342,26 @@ def test_duplicate_output_does_not_erase_a_failure() -> None:
     bundle = bundle_from_rollout(recs)
     step = next(s for s in bundle.steps if s.step_type == "function")
     assert step.error is not None  # the recorded FAILURE must survive the duplicate exit-0
+
+
+# --- B3: an ORPHAN output (call_id never seen) must not synthesize a fake turn boundary ---
+def test_orphan_output_does_not_create_a_false_retry() -> None:
+    """Two same-input exec_command calls in ONE turn, with an ORPHAN output (a call_id
+    that was never emitted) sitting between them. The orphan must NOT close the turn
+    and split the two calls into distinct turns — that would manufacture a false
+    cross-turn retry. Same-turn fan-out abstains; orphan is inert."""
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+    from agent_run_ledger.core.prescriptions import analyze_bundle
+    recs = [
+        {"type": "session_meta", "payload": {"id": "sB3"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"x\"}", "call_id": "c1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        # ORPHAN: output for a call_id that was never a call in this turn
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "ZZZ_orphan", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:02Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"x\"}", "call_id": "c2"}, "timestamp": "2026-05-29T12:00:03Z"},
+    ]
+    bundle = bundle_from_rollout(recs)
+    fn = [s for s in bundle.steps if s.step_type == "function"]
+    # both calls must share ONE turn (same-turn fan-out), not be split into two
+    assert len({s.parent_step_id for s in fn}) == 1
+    # and no prescription (same-turn fan-out abstains; the orphan didn't manufacture a retry)
+    assert analyze_bundle(bundle) == []

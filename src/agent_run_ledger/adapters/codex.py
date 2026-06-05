@@ -234,6 +234,7 @@ def _steps_from_records(
     # the open turn (a same-turn fan-out). Walk the records in order.
     turn_index = 0
     turn_open = False  # has a call been emitted in the current (un-closed) turn?
+    open_turn_call_ids: set[str] = set()  # call_ids emitted in the current open turn (B3)
     segment = 0  # bumped on a user-message boundary; partitions retry_scope (A1)
     steps: list[StepRecord] = []
     call_seq = 0
@@ -251,14 +252,19 @@ def _steps_from_records(
             # after the user). Core is untouched (provider-neutral invariant).
             segment += 1
             turn_open = False
+            open_turn_call_ids = set()
             continue
         if ptype in _TOOL_OUTPUT_TYPES:
-            # A tool result: the model will be re-invoked -> close the turn so the
-            # NEXT tool call starts a new one. (Multiple outputs in a row — e.g. a
-            # same-turn fan-out's two outputs — only close once; already closed is a
-            # no-op.)
-            if turn_open:
+            # A tool result closes the turn so the NEXT call starts a new one — BUT
+            # only if the output pairs to a call ACTUALLY emitted in THIS open turn
+            # (B3). An ORPHAN output (a call_id never seen in the open turn — corrupt
+            # log, background tool, or out-of-order) must NOT close the turn: doing so
+            # would split a same-turn fan-out into fake distinct turns and manufacture
+            # a false cross-turn retry. Orphan outputs are inert.
+            out_call_id = payload.get("call_id")
+            if turn_open and out_call_id is not None and str(out_call_id) in open_turn_call_ids:
                 turn_open = False
+                open_turn_call_ids = set()
             continue
         if ptype not in _TOOL_CALL_TYPES:
             continue
@@ -267,6 +273,10 @@ def _steps_from_records(
         if not turn_open:
             turn_index += 1
             turn_open = True
+            open_turn_call_ids = set()
+        cur_call_id = payload.get("call_id")
+        if cur_call_id is not None:
+            open_turn_call_ids.add(str(cur_call_id))
         call_seq += 1
         steps.append(
             _step_from_call(
