@@ -16,7 +16,7 @@ from agent_run_ledger.adapters.codex import (
     looks_like_jsonl,
 )
 from agent_run_ledger.core.compare import compare_bundles
-from agent_run_ledger.core.cost import cost_on_read
+from agent_run_ledger.core.cost import cost_display
 from agent_run_ledger.core.demo import load_demo_bundle
 from agent_run_ledger.core.io import TraceParseError, load_trace, write_trace
 from agent_run_ledger.core.models import TraceBundle, TraceValidationError
@@ -139,12 +139,14 @@ def list_runs_cmd(
         # total_cost_usd (which a price-table change — or a $0 capture cache —
         # makes stale). Load the bundle per run; linear in run count.
         bundle = load_bundle(db, run.id)
-        run_cost = cost_on_read(bundle)
+        # Use the DISCLOSURE form (A2): an unpriced real-token run reads as
+        # "unpriced (...)" here too, never a misleading bare $0 — consistent with the
+        # demo + HTML report (was: cost_on_read -> a silent $0 on this surface).
         table.add_row(
             run.id,
             run.workflow,
             run.success_label,
-            f"${run_cost:.6f}",
+            cost_display(bundle),
             str(run.total_input_tokens + run.total_output_tokens),
         )
     console.print(table)
