@@ -296,3 +296,17 @@ def test_wrong_file_doc_target_is_rejected() -> None:
 def test_genuine_code_target_still_accepted_after_path_guard() -> None:
     """Regression: the path guard must not reject a genuine .py code-target cap diff."""
     assert _is_retry_cap_diff(_GENUINE) is True
+
+
+def test_cross_file_constant_move_is_rejected() -> None:
+    """Task 51 / Codex fleet Finding 2: removing MAX_RETRIES=10 from one file and
+    adding MAX_RETRIES=0 to a DIFFERENT file is not lowering a live retry path (it
+    moves a constant between files) — must NOT grade as a retry-cap diff."""
+    d = ("--- a/service_a.py\n+++ b/service_a.py\n@@ -1 +0,0 @@\n-MAX_RETRIES = 10\n"
+         "--- a/service_b.py\n+++ b/service_b.py\n@@ -0,0 +1 @@\n+MAX_RETRIES = 0\n")
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_single_file_genuine_cap_still_accepted_after_single_file_guard() -> None:
+    """Regression: the single-file guard must not reject a genuine one-file cap diff."""
+    assert _is_retry_cap_diff(_GENUINE) is True

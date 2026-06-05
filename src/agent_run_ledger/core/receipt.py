@@ -239,6 +239,19 @@ def _is_retry_cap_diff(patch: str) -> bool:
         path = tgt.split("\t")[0].removeprefix("b/").removeprefix("a/")
         if any(path.lower().endswith(ext) for ext in _NON_CODE_EXTENSIONS):
             return False
+    # SINGLE FILE only (Task 51 / Codex fleet Finding 2): the removed and added budget
+    # lines are collected globally below, so a diff that REMOVES ``MAX_RETRIES = 10``
+    # from service_a.py and ADDS ``MAX_RETRIES = 0`` to service_b.py would match the
+    # same-identifier decrease check and falsely grade L2 — yet that moves a constant
+    # between files, it does not lower a live retry path. A genuine retry-cap patch
+    # touches exactly ONE file. (Also covers the symmetric ``--- `` side.)
+    minus_targets = [ln[4:].strip() for ln in lines if ln.startswith("--- ")]
+    distinct_files = {
+        t.split("\t")[0].removeprefix("b/").removeprefix("a/")
+        for t in (plus_targets + minus_targets)
+    }
+    if len(distinct_files) != 1:
+        return False
     # Consider only CONTENT lines (exclude file headers ---/+++).
     removed = [ln[1:] for ln in lines if ln.startswith("-") and not ln.startswith("---")]
     added = [ln[1:] for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
