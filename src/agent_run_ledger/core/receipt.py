@@ -219,38 +219,29 @@ def _is_retry_cap_diff(patch: str) -> bool:
     DECREASES (removed value > added value). That is what "statically removes the
     unbounded-retry path" actually means."""
     lines = patch.splitlines()
-    has_diff_markers = (
-        any(line.startswith("--- ") for line in lines)
-        and any(line.startswith("+++ ") for line in lines)
-        and any(line.startswith("@@") for line in lines)
-    )
-    if not has_diff_markers:
+    minus_headers = [ln for ln in lines if ln.startswith("--- ")]
+    plus_headers = [ln for ln in lines if ln.startswith("+++ ")]
+    hunk_headers = [ln for ln in lines if ln.startswith("@@")]
+    # EXACTLY one of each header (Task 51 / Codex fleet Finding 1+2): a genuine
+    # retry-cap patch is a SINGLE file, SINGLE hunk. Counting (not a distinct-path
+    # SET) is load-bearing — a DUPLICATED same-file header (`--- a/crm.py` twice)
+    # collapses to one set element and bypassed the old guard, AND a multi-file diff
+    # (remove from service_a, add to service_b) is not a live cap decrease. Requiring
+    # exactly one `---`, one `+++`, one `@@` rejects both without breaking a real diff.
+    if not (len(minus_headers) == 1 and len(plus_headers) == 1 and len(hunk_headers) == 1):
+        return False
+    # Same single file on both sides.
+    def _path(hdr: str) -> str:
+        return hdr[4:].strip().split("\t")[0].removeprefix("b/").removeprefix("a/")
+
+    if _path(minus_headers[0]) != _path(plus_headers[0]):
         return False
     # The target must be a CODE path, not documentation/prose (Task 51 wrong-file):
     # a real ``MAX_RETRIES = 0`` assignment living in docs.md changes no reachable
-    # code path, so it cannot "statically remove" the loop. Reject if ANY +++ target
-    # is a known doc/text extension. (NOTE: this closes the reported doc case; full
-    # path-binding — require the +++ target to equal the prescription's cited target
-    # file — is the stronger fix and remains a follow-up; the prescription does not yet
-    # always carry a structured target path.)
-    plus_targets = [ln[4:].strip() for ln in lines if ln.startswith("+++ ")]
-    for tgt in plus_targets:
-        # strip a/ b/ prefixes + timestamp suffix
-        path = tgt.split("\t")[0].removeprefix("b/").removeprefix("a/")
-        if any(path.lower().endswith(ext) for ext in _NON_CODE_EXTENSIONS):
-            return False
-    # SINGLE FILE only (Task 51 / Codex fleet Finding 2): the removed and added budget
-    # lines are collected globally below, so a diff that REMOVES ``MAX_RETRIES = 10``
-    # from service_a.py and ADDS ``MAX_RETRIES = 0`` to service_b.py would match the
-    # same-identifier decrease check and falsely grade L2 — yet that moves a constant
-    # between files, it does not lower a live retry path. A genuine retry-cap patch
-    # touches exactly ONE file. (Also covers the symmetric ``--- `` side.)
-    minus_targets = [ln[4:].strip() for ln in lines if ln.startswith("--- ")]
-    distinct_files = {
-        t.split("\t")[0].removeprefix("b/").removeprefix("a/")
-        for t in (plus_targets + minus_targets)
-    }
-    if len(distinct_files) != 1:
+    # code path, so it cannot "statically remove" the loop. (NOTE: closes the doc
+    # case; full path-binding to the prescription's cited target remains a follow-up.)
+    target = _path(plus_headers[0])
+    if any(target.lower().endswith(ext) for ext in _NON_CODE_EXTENSIONS):
         return False
     # Consider only CONTENT lines (exclude file headers ---/+++).
     removed = [ln[1:] for ln in lines if ln.startswith("-") and not ln.startswith("---")]
