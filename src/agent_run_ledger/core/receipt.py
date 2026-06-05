@@ -30,7 +30,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent_run_ledger.core.models import TraceBundle
+from agent_run_ledger.core.models import PrescriptionRecord, StepRecord, TraceBundle
+from agent_run_ledger.core.prescriptions import derive_retry_steps
 
 # Closed proof ladder (the SHAPE is locked; this slice grades only L0–L2).
 PROOF_LEVELS: tuple[str, ...] = ("L0", "L1", "L2", "L3", "L4", "L5", "L6")
@@ -66,13 +67,18 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
 
     Returns [] when there is no prescription (no detected failure) — the negative
     gate: no invented receipts on a clean run."""
+    # The DERIVED (collapsed) steps carry the AUTHORITATIVE retry_count per step id —
+    # a stored/imported prescription's free-form evidence is attacker-controllable, so
+    # grading must come from the real facts, not the evidence string (Task 51 forged).
+    derived_by_id = {s.id: s for s in derive_retry_steps(bundle)}
     receipts: list[RepairReceipt] = []
     for rx in bundle.prescriptions:
         # This slice grades the retry-cap class only. A prescription whose
-        # one_line_fix sets a retry budget is a retry_loop repair. The observed
-        # retry count (recovered from the prescription's evidence) is what the new
-        # cap must actually drop BELOW to earn L2 (B2).
-        observed = _observed_retry_count(rx.evidence)
+        # one_line_fix sets a retry budget is a retry_loop repair. The observed retry
+        # count must be the CITED STEP's REAL retry_count (looked up in the derived
+        # facts), NOT the number the evidence string claims — else forged evidence
+        # (retry_count=99 over a real 2) upgrades an insufficient cap to L2 (Task 51).
+        observed = _authoritative_observed_count(rx, derived_by_id)
         proof_level = _grade_retry_cap(rx.patch_type, rx.patch, observed)
         model_supplied = _model_priced_run(bundle)
         receipts.append(
@@ -154,6 +160,38 @@ def _observed_retry_count(evidence: list[str]) -> int | None:
         if (m := _OBSERVED_RETRY_RE.fullmatch(line.strip())) is not None
     }
     return next(iter(values)) if len(values) == 1 else None
+
+
+_STEP_ID_RE = re.compile(r"step_id=(\S+)")
+
+
+def _authoritative_observed_count(
+    rx: PrescriptionRecord, derived_by_id: dict[str, StepRecord]
+) -> int | None:
+    """The observed additional-attempt count to grade against — recovered from the
+    CITED STEP's REAL ``retry_count`` in the derived facts, NOT the evidence string.
+
+    Fail closed (return None -> L1) when sufficiency is unverifiable or evidence looks
+    FORGED (Task 51):
+      * no ``step_id=`` in evidence, or the cited step is not in the derived facts;
+      * the evidence's CLAIMED count (if present) DISAGREES with the cited step's real
+        count — a stored/imported prescription claiming ``retry_count=99`` over a real
+        2-attempt step is poisoned; we refuse rather than trust the larger number."""
+    step_ids = {
+        m.group(1) for line in rx.evidence if (m := _STEP_ID_RE.fullmatch(line.strip())) is not None
+    }
+    if len(step_ids) != 1:
+        return None
+    step = derived_by_id.get(next(iter(step_ids)))
+    if step is None:
+        return None
+    real = step.retry_count
+    claimed = _observed_retry_count(rx.evidence)
+    # If evidence claims a count, it must MATCH the real cited-step count; a mismatch
+    # (especially a larger forged claim) fails closed. Absent claim -> trust the fact.
+    if claimed is not None and claimed != real:
+        return None
+    return real
 
 
 def _new_cap_value(patch: str) -> int | None:
