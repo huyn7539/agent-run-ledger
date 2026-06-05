@@ -292,3 +292,35 @@ def test_reordered_key_retry_collapses_end_to_end() -> None:
     ]
     bundle = bundle_from_rollout(recs)
     assert len(analyze_bundle(bundle)) == 1  # reordered-key retry STILL collapses
+
+
+# --- A2: Codex cost honesty — price run totals when priced; DISCLOSE unpriced, never silent $0 ---
+def test_run_level_token_fallback_prices_a_priced_model() -> None:
+    """The mechanism: a priced model with run totals but zero per-step tokens (the
+    Codex shape) prices from the run totals (not a misleading $0)."""
+    from agent_run_ledger.core.models import RunRecord, StepRecord, TraceBundle, utc_now_iso
+    from agent_run_ledger.core.cost import cost_on_read, cost_is_priced
+    run = RunRecord(id="r", workflow="w", framework="codex-cli", provider="codex",
+        model="gpt-4o-mini", started_at=utc_now_iso(), ended_at=utc_now_iso(),
+        success_label="unknown", total_input_tokens=3000, total_output_tokens=150)
+    step = StepRecord(id="s", run_id="r", step_type="function", name="exec_command",
+        started_at=utc_now_iso(), ended_at=utc_now_iso())  # tokens default 0
+    bundle = TraceBundle(run=run, steps=[step])
+    assert cost_is_priced(bundle) is True
+    assert cost_on_read(bundle) == 0.00054  # 3000/1k*0.00015 + 150/1k*0.0006
+
+
+def test_unpriced_model_discloses_not_silent_zero() -> None:
+    """The honesty guard: the real fixture's model (gpt-5.5) is NOT in the stub price
+    table. With real tokens, the cost MUST read as an explicit 'unpriced' disclosure,
+    NOT a misleading $0.00 — the 'doesn't lie to the first user' bar."""
+    from pathlib import Path
+    from agent_run_ledger.adapters.codex import bundle_from_rollout, load_codex_rollout
+    from agent_run_ledger.core.cost import cost_is_priced, cost_display, _PRICES_PER_1K
+    bundle = bundle_from_rollout(load_codex_rollout(Path("tests/fixtures/codex/fire_no_edit_retry.jsonl")))
+    assert bundle.run.model not in _PRICES_PER_1K  # gpt-5.5 not stubbed (don't invent a price)
+    assert bundle.run.total_input_tokens > 0  # real tokens exist
+    assert cost_is_priced(bundle) is False
+    disclosure = cost_display(bundle)
+    assert "unpriced" in disclosure and bundle.run.model in disclosure
+    assert disclosure != "$0.000000"  # NOT a misleading silent zero
