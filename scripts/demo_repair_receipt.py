@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 
 from agent_run_ledger.adapters.openai import bundle_from_recorded_trace
-from agent_run_ledger.core.cost import cost_on_read
+from agent_run_ledger.core.cost import cost_display
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.receipt import build_receipts
 
@@ -72,7 +72,7 @@ def _gate_real_capture() -> str:
     print(f"  run id          : {bundle.run.id}")
     print(f"  model (hint)    : {bundle.run.model}")
     print(f"  provenance_hash : {bundle.run.provenance_hash}")
-    print(f"  cost_on_read    : ${cost_on_read(bundle):.6f}")
+    print(f"  cost_on_read    : {cost_display(bundle)}")
     print(f"  captured spans  : {len(bundle.steps)}")
     fn_steps = [s for s in bundle.steps if s.span_kind == "function"]
     print(

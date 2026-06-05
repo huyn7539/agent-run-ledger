@@ -22,11 +22,12 @@ def derive_retry_steps(bundle: TraceBundle) -> list[StepRecord]:
     """Collapse raw per-span steps into a retry-aware view, ON READ.
 
     A genuine retry loop is N repeated same-scope, same-input tool attempts with
-    >=1 failure (across turns, so the immediate parent differs but retry_scope is
-    stable). Such a run collapses to ONE StepRecord with retry_count=N-1, tokens +
-    cost SUMMED, error_class from the last attempt. Everything else (model/response
-    spans, legitimate repetition, app-supplied explicit retry_count) passes through
-    unchanged. The base bundle.steps is NOT mutated."""
+    >=1 failure, ONE attempt per distinct turn (each attempt under its own turn
+    parent while retry_scope stays stable). Such a run collapses to ONE StepRecord
+    with retry_count=N-1, tokens + cost SUMMED, error_class from the last attempt.
+    Everything else (model/response spans, legitimate repetition, app-supplied
+    explicit retry_count) passes through unchanged. The base bundle.steps is NOT
+    mutated."""
     steps = bundle.steps
     # Deterministic order mirrors provenance.py: (started_at, id).
     indexed = sorted(range(len(steps)), key=lambda i: (steps[i].started_at, steps[i].id))
@@ -36,9 +37,12 @@ def derive_retry_steps(bundle: TraceBundle) -> list[StepRecord]:
             name=steps[i].name,
             span_kind=steps[i].span_kind,
             retry_scope=steps[i].retry_scope,
-            # B3: the immediate (turn) parent. A real cross-turn retry differs here
-            # per attempt; a same-turn fan-out shares it. The grouper requires a
-            # retry loop to span >1 turn, rejecting same-turn fan-out.
+            # B3: the immediate (turn) parent. A real cross-turn retry gives each
+            # attempt its OWN distinct turn parent. The grouper requires ONE attempt
+            # per DISTINCT turn (_is_one_attempt_per_distinct_turn): it rejects not
+            # only pure same-turn fan-out ([t1,t1,t1]) but any group that smuggles a
+            # same-turn duplicate alongside cross-turn attempts ([t1,t2,t2]) — a
+            # bare >1-turn count is not enough.
             turn_id=steps[i].parent_step_id,
             started_at=steps[i].started_at,
             ended_at=steps[i].ended_at,

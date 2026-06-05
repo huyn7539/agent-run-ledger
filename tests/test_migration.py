@@ -14,7 +14,6 @@ from agent_run_ledger.core.io import load_trace
 from agent_run_ledger.core.models import (
     SCHEMA_VERSION,
     RunRecord,
-    StepRecord,
     TraceBundle,
     TraceValidationError,
     is_version_compatible,

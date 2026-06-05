@@ -19,9 +19,18 @@ Grade honesty rules:
     regression-to-the-mean caveat (ARL fires on the worst runs, which partly
     self-correct) and any model fact supplied by the app.
 
-This module is provider-neutral and content-free: it reads only bounded facts and
-the already-redacted prescription evidence. It introduces NO new egress channel
-content beyond bounded labels/numbers.
+This module is provider-neutral. The DETECTION and GRADING facts it computes are
+content-free: the claim, proof level, confidence, limits, next_evidence, and the
+evidence list read only bounded labels/numbers from the already-redacted
+prescription. Those fields introduce NO new egress channel content.
+
+ONE field is NOT content-free: ``repair_artifact.patch`` (and the app-supplied
+allowed-metadata ``before`` / ``path`` / ``after`` values it is built from) MAY
+carry local file paths and source-line content — the unified_diff embeds the real
+``before`` line and the repo-relative ``path``. So a receipt is safe to surface
+locally, but ``repair_artifact.patch`` is NOT remote-egress-safe until the Task 46
+allowed-metadata value scrub redacts those before/path/after values. Treat the
+patch as local-only output, not a bounded label, when forwarding off-box.
 """
 
 from __future__ import annotations
@@ -30,7 +39,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent_run_ledger.core.models import TraceBundle
+from agent_run_ledger.core.models import PrescriptionRecord, StepRecord, TraceBundle
+from agent_run_ledger.core.prescriptions import derive_retry_steps
 
 # Closed proof ladder (the SHAPE is locked; this slice grades only L0–L2).
 PROOF_LEVELS: tuple[str, ...] = ("L0", "L1", "L2", "L3", "L4", "L5", "L6")
@@ -66,13 +76,18 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
 
     Returns [] when there is no prescription (no detected failure) — the negative
     gate: no invented receipts on a clean run."""
+    # The DERIVED (collapsed) steps carry the AUTHORITATIVE retry_count per step id —
+    # a stored/imported prescription's free-form evidence is attacker-controllable, so
+    # grading must come from the real facts, not the evidence string (Task 51 forged).
+    derived_by_id = {s.id: s for s in derive_retry_steps(bundle)}
     receipts: list[RepairReceipt] = []
     for rx in bundle.prescriptions:
         # This slice grades the retry-cap class only. A prescription whose
-        # one_line_fix sets a retry budget is a retry_loop repair. The observed
-        # retry count (recovered from the prescription's evidence) is what the new
-        # cap must actually drop BELOW to earn L2 (B2).
-        observed = _observed_retry_count(rx.evidence)
+        # one_line_fix sets a retry budget is a retry_loop repair. The observed retry
+        # count must be the CITED STEP's REAL retry_count (looked up in the derived
+        # facts), NOT the number the evidence string claims — else forged evidence
+        # (retry_count=99 over a real 2) upgrades an insufficient cap to L2 (Task 51).
+        observed = _authoritative_observed_count(rx, derived_by_id)
         proof_level = _grade_retry_cap(rx.patch_type, rx.patch, observed)
         model_supplied = _model_priced_run(bundle)
         receipts.append(
@@ -156,6 +171,42 @@ def _observed_retry_count(evidence: list[str]) -> int | None:
     return next(iter(values)) if len(values) == 1 else None
 
 
+_STEP_ID_RE = re.compile(r"step_id=(\S+)")
+
+# Documentation / prose targets: a retry-budget-looking assignment changed in one of
+# these is not a reachable code path, so it cannot statically remove the loop (Task 51).
+_NON_CODE_EXTENSIONS = (".md", ".rst", ".txt", ".markdown", ".adoc")
+
+
+def _authoritative_observed_count(
+    rx: PrescriptionRecord, derived_by_id: dict[str, StepRecord]
+) -> int | None:
+    """The observed additional-attempt count to grade against — recovered from the
+    CITED STEP's REAL ``retry_count`` in the derived facts, NOT the evidence string.
+
+    Fail closed (return None -> L1) when sufficiency is unverifiable or evidence looks
+    FORGED (Task 51):
+      * no ``step_id=`` in evidence, or the cited step is not in the derived facts;
+      * the evidence's CLAIMED count (if present) DISAGREES with the cited step's real
+        count — a stored/imported prescription claiming ``retry_count=99`` over a real
+        2-attempt step is poisoned; we refuse rather than trust the larger number."""
+    step_ids = {
+        m.group(1) for line in rx.evidence if (m := _STEP_ID_RE.fullmatch(line.strip())) is not None
+    }
+    if len(step_ids) != 1:
+        return None
+    step = derived_by_id.get(next(iter(step_ids)))
+    if step is None:
+        return None
+    real = step.retry_count
+    claimed = _observed_retry_count(rx.evidence)
+    # If evidence claims a count, it must MATCH the real cited-step count; a mismatch
+    # (especially a larger forged claim) fails closed. Absent claim -> trust the fact.
+    if claimed is not None and claimed != real:
+        return None
+    return real
+
+
 def _new_cap_value(patch: str) -> int | None:
     """Return the integer retry budget the diff's ADDED line sets, reusing the same
     budget-line recognizer the syntax gate uses. None if not recoverable."""
@@ -177,51 +228,99 @@ def _is_retry_cap_diff(patch: str) -> bool:
     DECREASES (removed value > added value). That is what "statically removes the
     unbounded-retry path" actually means."""
     lines = patch.splitlines()
-    has_diff_markers = (
-        any(line.startswith("--- ") for line in lines)
-        and any(line.startswith("+++ ") for line in lines)
-        and any(line.startswith("@@") for line in lines)
-    )
-    if not has_diff_markers:
+    minus_headers = [ln for ln in lines if ln.startswith("--- ")]
+    plus_headers = [ln for ln in lines if ln.startswith("+++ ")]
+    hunk_headers = [ln for ln in lines if ln.startswith("@@")]
+    # EXACTLY one of each header (Task 51 / Codex fleet Finding 1+2): a genuine
+    # retry-cap patch is a SINGLE file, SINGLE hunk. Counting (not a distinct-path
+    # SET) is load-bearing — a DUPLICATED same-file header (`--- a/crm.py` twice)
+    # collapses to one set element and bypassed the old guard, AND a multi-file diff
+    # (remove from service_a, add to service_b) is not a live cap decrease. Requiring
+    # exactly one `---`, one `+++`, one `@@` rejects both without breaking a real diff.
+    if not (len(minus_headers) == 1 and len(plus_headers) == 1 and len(hunk_headers) == 1):
+        return False
+    # Same single file on both sides.
+    def _path(hdr: str) -> str:
+        return hdr[4:].strip().split("\t")[0].removeprefix("b/").removeprefix("a/")
+
+    if _path(minus_headers[0]) != _path(plus_headers[0]):
+        return False
+    # The target must be a CODE path, not documentation/prose (Task 51 wrong-file):
+    # a real ``MAX_RETRIES = 0`` assignment living in docs.md changes no reachable
+    # code path, so it cannot "statically remove" the loop. (NOTE: closes the doc
+    # case; full path-binding to the prescription's cited target remains a follow-up.)
+    target = _path(plus_headers[0])
+    if any(target.lower().endswith(ext) for ext in _NON_CODE_EXTENSIONS):
         return False
     # Consider only CONTENT lines (exclude file headers ---/+++).
     removed = [ln[1:] for ln in lines if ln.startswith("-") and not ln.startswith("---")]
     added = [ln[1:] for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
-    old_budget = _retry_budget_value(removed)
-    new_budget = _retry_budget_value(added)
-    if old_budget is None or new_budget is None:
+    old = _retry_budget_assignment(removed)
+    new = _retry_budget_assignment(added)
+    if old is None or new is None:
+        return False
+    old_ident, old_budget = old
+    new_ident, new_budget = new
+    # The SAME identifier must be lowered: a diff that removes CRM_MAX_RETRIES and adds
+    # PAYMENTS_MAX_RETRIES is not "lowering the observed loop's cap" (Task 51).
+    if old_ident != new_ident:
         return False
     # Strict decrease: the cap is lower than the prior budget.
-    return new_budget < old_budget
+    if new_budget >= old_budget:
+        return False
+    # NO OTHER executable change: the ONLY changed content line on each side is the
+    # one budget assignment. An extra added/removed line (e.g. an injected
+    # ``import os; os.system(...)`` alongside the cap decrease) means the patch does
+    # more than bound the retry budget, so it is NOT a clean apply-safe retry-cap diff
+    # and must not earn L2 (Task 51 — extra-payload). Context/blank lines are fine.
+    extra = [ln for ln in (removed + added) if ln.strip() and _RETRY_BUDGET_LINE.match(ln.strip()) is None]
+    if extra:
+        return False
+    return True
 
 
-# A retry-budget assignment line: an identifier mentioning retr/retries/attempts/
-# backoff/max_tries set to an integer (e.g. CRM_LOOKUP_MAX_RETRIES = 5,
-# retry_budget: 3). The identifier match is what excludes unrelated diffs whose
-# PATH merely contains "retr" (e.g. retrieve.py).
+# A retry-budget assignment line — ANCHORED at the start of the (stripped) line to a
+# real ``IDENTIFIER = INTEGER`` / ``IDENTIFIER: INTEGER`` assignment where the
+# identifier names a retry budget. Anchoring (``^``) is the load-bearing change
+# (Task 51): the old ``search()`` matched the pattern ANYWHERE in the line, so a
+# string literal (``print("MAX_RETRIES = 10")``), a docstring, or any embedded text
+# graded L2. A live assignment starts the line; a string/call/comment does not.
 _RETRY_BUDGET_LINE = re.compile(
-    r"(retr(y|ies)|max[_ ]?tries|attempts|backoff)\w*\s*[:=]\s*(\d+)",
+    r"^([A-Za-z_][A-Za-z0-9_.]*(?:retr(?:y|ies)|max[_ ]?tries|attempts|backoff)[A-Za-z0-9_]*)"
+    # [0-9]+ NOT \d+ : \d matches Unicode fullwidth digits (e.g. '３'), which int()
+    # accepts but Python does NOT compile as a live integer literal — that let a
+    # non-executable assignment grade L2 (Task 51, Codex). ASCII decimal only.
+    r"\s*[:=]\s*([0-9]+)\s*$",
     re.IGNORECASE,
 )
 
-# Leading comment markers: a budget assignment behind one of these is COMMENTED OUT,
-# so changing it removes nothing from the live code path (Codex re-review P2). We
-# reject a line whose first non-blank characters begin a comment.
-_COMMENT_PREFIX = re.compile(r"^\s*(#|//|--|;)")
+# Comment markers (line AND block): a budget assignment behind any of these is not a
+# live code path, so changing it removes nothing (Codex re-review P2 + Task 51 block
+# comments). Reject a line whose first non-blank chars begin a comment OR a string.
+_COMMENT_OR_STRING_PREFIX = re.compile(r'^\s*(#|//|--|;|/\*|\*|"""|\'\'\'|"|\')')
+
+
+def _retry_budget_assignment(content_lines: list[str]) -> tuple[str, int] | None:
+    """Return ``(identifier, value)`` for exactly ONE live retry-budget assignment in
+    *content_lines*, or None if zero / more-than-one (ambiguous -> reject). A line
+    behind a comment or string marker is NOT a live assignment and is skipped. The
+    regex is ANCHORED, so only a real start-of-line assignment matches — a string
+    literal / call / embedded text does not."""
+    found: list[tuple[str, int]] = []
+    for line in content_lines:
+        stripped = line.strip()
+        if _COMMENT_OR_STRING_PREFIX.match(stripped) is not None:
+            continue
+        m = _RETRY_BUDGET_LINE.match(stripped)
+        if m is not None:
+            found.append((m.group(1), int(m.group(2))))
+    return found[0] if len(found) == 1 else None
 
 
 def _retry_budget_value(content_lines: list[str]) -> int | None:
-    """Return the integer retry budget asserted by exactly one LIVE assignment line in
-    *content_lines*, or None if zero or more-than-one such line is present (ambiguous
-    -> reject). A commented-out budget line is NOT a live assignment — changing it
-    removes nothing — so lines beginning with a comment marker are skipped."""
-    values = [
-        int(m.group(3))
-        for line in content_lines
-        if _COMMENT_PREFIX.match(line) is None
-        and (m := _RETRY_BUDGET_LINE.search(line)) is not None
-    ]
-    return values[0] if len(values) == 1 else None
+    """Back-compat shim: the integer of the single live retry-budget assignment."""
+    a = _retry_budget_assignment(content_lines)
+    return a[1] if a is not None else None
 
 
 def _model_priced_run(bundle: TraceBundle) -> bool:
@@ -241,8 +340,9 @@ def _claim(proof_level: str) -> str:
         )
     if proof_level == "L1":
         return (
-            "This repair is relevant to the observed retry loop and is applyable "
-            "(relevance only; mechanical removal not established)."
+            "This repair direction is relevant to the observed retry loop, but "
+            "mechanical removal is not established (relevance only; the "
+            "config_diff fallback carries no file/line target to apply)."
         )
     return "ARL found a likely retry loop; no accepted fix (diagnostic)."
 

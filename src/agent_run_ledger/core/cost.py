@@ -49,12 +49,24 @@ def _compute_from_tokens(bundle: TraceBundle) -> float | None:
         return None
     in_per_1k, out_per_1k, cached_per_1k = price
     total = 0.0
+    step_tokens = 0
     for s in bundle.steps:
+        step_tokens += s.input_tokens + s.output_tokens + s.cached_input_tokens + s.reasoning_tokens
         billable_input = max(0, s.input_tokens - s.cached_input_tokens)
         total += (billable_input / 1000.0) * in_per_1k
         total += (s.cached_input_tokens / 1000.0) * cached_per_1k
         # reasoning tokens are billed at the output rate by current providers.
         total += ((s.output_tokens + s.reasoning_tokens) / 1000.0) * out_per_1k
+    # Run-level-only token fallback (provider-neutral; keyed on the FACT pattern, not
+    # any adapter): some providers carry only a cumulative RUN token total with no
+    # per-call breakdown, so every step's token fields are 0.
+    # Pricing per-step then yields a misleading $0 on a real run. When the steps carry
+    # NO tokens but the run does, price the run totals instead — the tokens are real
+    # facts; only their per-call attribution is unavailable.
+    if step_tokens == 0 and (bundle.run.total_input_tokens or bundle.run.total_output_tokens):
+        run_in = max(0, bundle.run.total_input_tokens)
+        run_out = max(0, bundle.run.total_output_tokens)
+        return round((run_in / 1000.0) * in_per_1k + (run_out / 1000.0) * out_per_1k, 8)
     return round(total, 8)
 
 
@@ -71,3 +83,25 @@ def cost_on_read(bundle: TraceBundle) -> float:
     if computed is not None:
         return computed
     return bundle.run.total_cost_usd
+
+
+def cost_is_priced(bundle: TraceBundle) -> bool:
+    """True iff the cost was actually derived (provider-reported OR model-priced),
+    vs. an unpriced fallback. Lets the render layer show "unpriced (model X)" instead
+    of a misleading bare $0.00 when the model is unknown to the stub table but real
+    tokens exist (A2). A genuine $0 (priced model, zero tokens) is still 'priced'."""
+    if any(s.provider_reported_cost_usd is not None for s in bundle.steps):
+        return True
+    return _compute_from_tokens(bundle) is not None
+
+
+def cost_display(bundle: TraceBundle) -> str:
+    """Human-facing cost string: a dollar figure when priced, else an explicit
+    'unpriced' disclosure naming the unknown model — never a misleading bare $0 on a
+    real run with real tokens (A2)."""
+    if cost_is_priced(bundle):
+        return f"${cost_on_read(bundle):.6f}"
+    has_tokens = bool(bundle.run.total_input_tokens or bundle.run.total_output_tokens)
+    if has_tokens:
+        return f"unpriced (model {bundle.run.model!r} not in price table; tokens recorded)"
+    return "$0.000000"

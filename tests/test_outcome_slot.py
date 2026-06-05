@@ -76,7 +76,6 @@ def test_outcome_json_is_one_column_not_three() -> None:
 # --- L14: success_label semantics documented (self-report, not a verdict) -----
 
 def test_success_label_documented_as_self_report() -> None:
-    doc = (RunRecord.__doc__ or "") + models_mod.__doc__ if models_mod.__doc__ else (RunRecord.__doc__ or "")
     # the contract must be written somewhere a reader will see it
     src = Path(models_mod.__file__).read_text(encoding="utf-8")
     assert "self-report" in src.lower()
