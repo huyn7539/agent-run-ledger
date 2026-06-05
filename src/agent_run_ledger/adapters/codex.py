@@ -316,12 +316,25 @@ def _step_from_call(
     if not started_at:
         started_at = ended_at
 
-    # has_error is PARSED from the exit status, NOT defaulted. exit_code is None
-    # when no status line was present -> treat as no error (conservative). A
-    # content-free marker is stored as the error so ``error is not None`` (the
-    # detector's has_error) reflects the real failure; the raw message is never
-    # stored (models.sanitize_error redacts to a constant; classify_error drops it).
-    raw_error = f"exit_code={exit_code}" if (exit_code is not None and exit_code != 0) else None
+    # has_error is PARSED from the exit status, NOT defaulted. exit_code is None when
+    # no status line was present -> treat as no error (conservative). A content-free
+    # marker is stored as the error so ``error is not None`` (the detector's has_error)
+    # reflects the real failure; the raw message is never stored (models.sanitize_error
+    # redacts to a constant; classify_error drops it).
+    #
+    # INCOMPLETE (Task 54): a call with NO output record at all (output_rec is None)
+    # is UNTERMINATED — the run was interrupted/killed mid-call. ARL must NOT record
+    # that as a clean success (the one thing the product can't do — lie on a real
+    # interrupted trace). Mark it incomplete so ``error is not None``. This is distinct
+    # from a present-but-statusless output (genuinely unknown -> conservatively not an
+    # error). An incomplete call is terminal in an interrupted run, so this never
+    # manufactures a false retry loop.
+    if output_rec is None:
+        raw_error = "incomplete: tool call has no result (run interrupted before completion)"
+    elif exit_code is not None and exit_code != 0:
+        raw_error = f"exit_code={exit_code}"
+    else:
+        raw_error = None
 
     return StepRecord(
         id=f"step_{session_id[:8]}_{seq:04d}",

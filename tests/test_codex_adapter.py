@@ -365,3 +365,32 @@ def test_orphan_output_does_not_create_a_false_retry() -> None:
     assert len({s.parent_step_id for s in fn}) == 1
     # and no prescription (same-turn fan-out abstains; the orphan didn't manufacture a retry)
     assert analyze_bundle(bundle) == []
+
+
+# --- Task 54: an interrupted call (no output record) must NOT read as a clean success ---
+def test_interrupted_call_is_marked_incomplete_not_success() -> None:
+    """A function_call with NO matching function_call_output (run killed mid-call)
+    must NOT import as error-free success — it is INCOMPLETE/unterminated. ARL lying
+    'this succeeded' on a real interrupted trace is the one thing it can't do."""
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+    recs = [
+        {"type": "session_meta", "payload": {"id": "sInt"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"x\"}", "call_id": "c1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        # NO function_call_output for c1 — the run was interrupted mid-call
+    ]
+    bundle = bundle_from_rollout(recs)
+    step = next(s for s in bundle.steps if s.step_type == "function")
+    assert step.error is not None, "an interrupted (no-output) call must not read as a clean success"
+
+
+def test_completed_success_call_is_unaffected_by_incomplete_marking() -> None:
+    """Guard: a call WITH a successful output stays a clean success (no false incomplete)."""
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+    recs = [
+        {"type": "session_meta", "payload": {"id": "sOk"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"x\"}", "call_id": "c1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "ok"}, "timestamp": "2026-05-29T12:00:02Z"},
+    ]
+    bundle = bundle_from_rollout(recs)
+    step = next(s for s in bundle.steps if s.step_type == "function")
+    assert step.error is None, "a completed successful call must stay a clean success"
