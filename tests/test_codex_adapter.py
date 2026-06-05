@@ -242,3 +242,53 @@ def test_unrelated_user_message_does_not_suppress_a_genuine_retry() -> None:
     ]
     bundle = bundle_from_rollout(recs)
     assert len(analyze_bundle(bundle)) == 1  # genuine autonomous retry STILL fires
+
+
+# --- A3: argument fingerprint must be canonical (semantic, not byte-literal) (vault-CC, 2026-06-05) ---
+def test_reordered_key_arguments_share_one_input_fingerprint() -> None:
+    """exec_command.arguments is a JSON STRING. Two SEMANTICALLY IDENTICAL commands
+    that differ only in key order / whitespace must hash to the SAME
+    input_fingerprint — otherwise a genuine retry of the same command never
+    collapses (a false negative). The fingerprint stays content-free (a one-way
+    SHA-256 over the CANONICAL JSON; the raw input is never stored)."""
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+
+    recs = [
+        {"type": "session_meta", "payload": {"id": "sessFP"}},
+        # same command object, reordered keys + extra whitespace -> byte-different strings
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\",\"workdir\":\"/x\"}", "call_id": "f1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "f1", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:02Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{ \"workdir\": \"/x\", \"cmd\": \"pytest\" }", "call_id": "f2"}, "timestamp": "2026-05-29T12:00:03Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "f2", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:04Z"},
+    ]
+    bundle = bundle_from_rollout(recs)
+    fn_steps = sorted(
+        (s for s in bundle.steps if s.span_kind == "function"),
+        key=lambda s: s.started_at,
+    )
+    assert len(fn_steps) == 2
+    fps = {s.input_fingerprint for s in fn_steps}
+    assert None not in fps
+    assert len(fps) == 1  # reordered-key / whitespace-different -> SAME fingerprint
+
+
+def test_reordered_key_retry_collapses_end_to_end() -> None:
+    """End-to-end: a real no-edit retry where the repeated command's arguments are
+    re-serialized with DIFFERENT key order each attempt (as a model legitimately
+    may) must STILL collapse to exactly one retry prescription. With byte-literal
+    hashing the fingerprints diverge and the loop is missed (a false negative);
+    canonicalization fixes it. The ONLY variable vs the genuine-retry fixture is
+    arguments key order — distinct turns, no apply_patch, no user_message between."""
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+
+    recs = [
+        {"type": "session_meta", "payload": {"id": "sessFP2"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\",\"workdir\":\"/x\"}", "call_id": "h1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "h1", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:02Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"workdir\":\"/x\",\"cmd\":\"pytest\"}", "call_id": "h2"}, "timestamp": "2026-05-29T12:00:03Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "h2", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:04Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{ \"workdir\": \"/x\", \"cmd\": \"pytest\" }", "call_id": "h3"}, "timestamp": "2026-05-29T12:00:05Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "h3", "output": "ok"}, "timestamp": "2026-05-29T12:00:06Z"},
+    ]
+    bundle = bundle_from_rollout(recs)
+    assert len(analyze_bundle(bundle)) == 1  # reordered-key retry STILL collapses

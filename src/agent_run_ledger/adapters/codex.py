@@ -398,7 +398,19 @@ def _input_fingerprint(payload: dict[str, Any]) -> str | None:
     if raw is None:
         return None
     if isinstance(raw, str):
-        canonical = raw
+        # ``exec_command.arguments`` is a JSON string, so two semantically
+        # identical commands with reordered keys / different whitespace would
+        # otherwise hash differently and a genuine retry would never collapse (a
+        # false negative). Canonicalize before hashing; if it is NOT valid JSON
+        # (e.g. an ``apply_patch`` patch string), fall back to the raw string —
+        # behavior unchanged. Still content-free: a one-way digest, never the
+        # raw input.
+        try:
+            canonical = json.dumps(
+                json.loads(raw), sort_keys=True, separators=(",", ":")
+            )
+        except (TypeError, ValueError):
+            canonical = raw
     else:
         try:
             canonical = json.dumps(raw, sort_keys=True, ensure_ascii=False, default=str)
