@@ -164,6 +164,10 @@ def _observed_retry_count(evidence: list[str]) -> int | None:
 
 _STEP_ID_RE = re.compile(r"step_id=(\S+)")
 
+# Documentation / prose targets: a retry-budget-looking assignment changed in one of
+# these is not a reachable code path, so it cannot statically remove the loop (Task 51).
+_NON_CODE_EXTENSIONS = (".md", ".rst", ".txt", ".markdown", ".adoc")
+
 
 def _authoritative_observed_count(
     rx: PrescriptionRecord, derived_by_id: dict[str, StepRecord]
@@ -222,6 +226,19 @@ def _is_retry_cap_diff(patch: str) -> bool:
     )
     if not has_diff_markers:
         return False
+    # The target must be a CODE path, not documentation/prose (Task 51 wrong-file):
+    # a real ``MAX_RETRIES = 0`` assignment living in docs.md changes no reachable
+    # code path, so it cannot "statically remove" the loop. Reject if ANY +++ target
+    # is a known doc/text extension. (NOTE: this closes the reported doc case; full
+    # path-binding — require the +++ target to equal the prescription's cited target
+    # file — is the stronger fix and remains a follow-up; the prescription does not yet
+    # always carry a structured target path.)
+    plus_targets = [ln[4:].strip() for ln in lines if ln.startswith("+++ ")]
+    for tgt in plus_targets:
+        # strip a/ b/ prefixes + timestamp suffix
+        path = tgt.split("\t")[0].removeprefix("b/").removeprefix("a/")
+        if any(path.lower().endswith(ext) for ext in _NON_CODE_EXTENSIONS):
+            return False
     # Consider only CONTENT lines (exclude file headers ---/+++).
     removed = [ln[1:] for ln in lines if ln.startswith("-") and not ln.startswith("---")]
     added = [ln[1:] for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
@@ -257,7 +274,10 @@ def _is_retry_cap_diff(patch: str) -> bool:
 # graded L2. A live assignment starts the line; a string/call/comment does not.
 _RETRY_BUDGET_LINE = re.compile(
     r"^([A-Za-z_][A-Za-z0-9_.]*(?:retr(?:y|ies)|max[_ ]?tries|attempts|backoff)[A-Za-z0-9_]*)"
-    r"\s*[:=]\s*(\d+)\s*$",
+    # [0-9]+ NOT \d+ : \d matches Unicode fullwidth digits (e.g. '３'), which int()
+    # accepts but Python does NOT compile as a live integer literal — that let a
+    # non-executable assignment grade L2 (Task 51, Codex). ASCII decimal only.
+    r"\s*[:=]\s*([0-9]+)\s*$",
     re.IGNORECASE,
 )
 

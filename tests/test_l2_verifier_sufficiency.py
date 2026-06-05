@@ -277,3 +277,22 @@ def test_forged_evidence_retry_count_cannot_upgrade_to_l2() -> None:
     receipts = build_receipts(bundle)
     # forged 99 must be ignored; the real step's retry_count=2 means cap 5 is insufficient
     assert receipts[0].proof_level == "L1"
+
+
+def test_unicode_fullwidth_digit_is_rejected() -> None:
+    """Task 51 (Codex): \\d matches Unicode fullwidth digits (３) that int() accepts but
+    Python does not compile — a non-executable assignment must not grade as a cap diff."""
+    d = "--- a/crm.py\n+++ b/crm.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = ３\n+CRM_MAX_RETRIES = ０\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_wrong_file_doc_target_is_rejected() -> None:
+    """Task 51 (Codex): a real retry-budget assignment inside a DOC file (docs.md)
+    changes no reachable code path -> must not grade as a cap diff."""
+    d = "--- a/docs.md\n+++ b/docs.md\n@@ -1 +1 @@\n-MAX_RETRIES = 5\n+MAX_RETRIES = 0\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_genuine_code_target_still_accepted_after_path_guard() -> None:
+    """Regression: the path guard must not reject a genuine .py code-target cap diff."""
+    assert _is_retry_cap_diff(_GENUINE) is True
