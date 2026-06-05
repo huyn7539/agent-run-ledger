@@ -9,11 +9,17 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from agent_run_ledger.adapters.codex import (
+    CodexRolloutError,
+    bundle_from_rollout,
+    load_codex_rollout,
+    looks_like_jsonl,
+)
 from agent_run_ledger.core.compare import compare_bundles
 from agent_run_ledger.core.cost import cost_on_read
 from agent_run_ledger.core.demo import load_demo_bundle
 from agent_run_ledger.core.io import TraceParseError, load_trace, write_trace
-from agent_run_ledger.core.models import TraceValidationError
+from agent_run_ledger.core.models import TraceBundle, TraceValidationError
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.report import render_comparison, write_report
 from agent_run_ledger.core.storage import (
@@ -58,12 +64,27 @@ def run_demo(
     console.print(f"stored demo run: {run_id}")
 
 
+def _load_any_trace(path: Path) -> TraceBundle:
+    """Route an import by FORMAT (provider-neutral detection):
+
+    * a line-delimited JSON log (``.jsonl`` / multiple JSON objects) -> the Codex
+      rollout adapter, which maps the provider log into the neutral TraceBundle;
+    * a single JSON object -> the existing TraceBundle path (``load_trace``).
+
+    The detection names no provider field — only the file shape — so the core
+    stays provider-neutral; the Codex-specific parsing lives entirely in the
+    adapter."""
+    if looks_like_jsonl(path):
+        return bundle_from_rollout(load_codex_rollout(path))
+    return load_trace(path)
+
+
 @app.command("import")
 def import_trace(
-    path: Path = typer.Argument(..., help="Trace JSON file."),
+    path: Path = typer.Argument(..., help="Trace file: a single-object trace JSON, or a Codex .jsonl rollout log."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
-    bundle = _friendly_or_exit(lambda: load_trace(path))
+    bundle = _friendly_or_exit(lambda: _load_any_trace(path))
     bundle = bundle.with_prescriptions(analyze_bundle(bundle))
     run_id = _friendly_or_exit(lambda: save_bundle(db, bundle))
     console.print(f"imported run: {run_id}")
@@ -140,7 +161,13 @@ def _load_bundle_or_exit(db: Path, run_id: str):
 def _friendly_or_exit(action: Callable[[], T]) -> T:
     try:
         return action()
-    except (FileNotFoundError, json.JSONDecodeError, TraceParseError, TraceValidationError) as exc:
+    except (
+        FileNotFoundError,
+        json.JSONDecodeError,
+        TraceParseError,
+        TraceValidationError,
+        CodexRolloutError,
+    ) as exc:
         console.print(f"error: {exc}")
         raise typer.Exit(1) from exc
 
