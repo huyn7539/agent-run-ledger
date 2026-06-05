@@ -4,7 +4,9 @@ Agent Run Ledger is a local-first CLI for AI agent workflows.
 
 Wedge:
 
-> Every agent run gets a receipt, a diff, and a fix artifact.
+> Every agent run gets a ledger record. Every DETECTED failure gets a graded repair receipt — and, when the evidence supports it, a concrete fix artifact.
+
+(A clean run with no detected failure emits no prescription and no receipt — by design: ARL does not invent receipts where there is nothing to repair.)
 
 V0 records agent runs, stores them in SQLite, renders static HTML reports, compares runs, and emits a retry/cost-loop prescription with a concrete patch artifact.
 
