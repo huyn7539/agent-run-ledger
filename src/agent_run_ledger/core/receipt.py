@@ -187,41 +187,69 @@ def _is_retry_cap_diff(patch: str) -> bool:
     # Consider only CONTENT lines (exclude file headers ---/+++).
     removed = [ln[1:] for ln in lines if ln.startswith("-") and not ln.startswith("---")]
     added = [ln[1:] for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
-    old_budget = _retry_budget_value(removed)
-    new_budget = _retry_budget_value(added)
-    if old_budget is None or new_budget is None:
+    old = _retry_budget_assignment(removed)
+    new = _retry_budget_assignment(added)
+    if old is None or new is None:
+        return False
+    old_ident, old_budget = old
+    new_ident, new_budget = new
+    # The SAME identifier must be lowered: a diff that removes CRM_MAX_RETRIES and adds
+    # PAYMENTS_MAX_RETRIES is not "lowering the observed loop's cap" (Task 51).
+    if old_ident != new_ident:
         return False
     # Strict decrease: the cap is lower than the prior budget.
-    return new_budget < old_budget
+    if new_budget >= old_budget:
+        return False
+    # NO OTHER executable change: the ONLY changed content line on each side is the
+    # one budget assignment. An extra added/removed line (e.g. an injected
+    # ``import os; os.system(...)`` alongside the cap decrease) means the patch does
+    # more than bound the retry budget, so it is NOT a clean apply-safe retry-cap diff
+    # and must not earn L2 (Task 51 — extra-payload). Context/blank lines are fine.
+    extra = [ln for ln in (removed + added) if ln.strip() and _RETRY_BUDGET_LINE.match(ln.strip()) is None]
+    if extra:
+        return False
+    return True
 
 
-# A retry-budget assignment line: an identifier mentioning retr/retries/attempts/
-# backoff/max_tries set to an integer (e.g. CRM_LOOKUP_MAX_RETRIES = 5,
-# retry_budget: 3). The identifier match is what excludes unrelated diffs whose
-# PATH merely contains "retr" (e.g. retrieve.py).
+# A retry-budget assignment line — ANCHORED at the start of the (stripped) line to a
+# real ``IDENTIFIER = INTEGER`` / ``IDENTIFIER: INTEGER`` assignment where the
+# identifier names a retry budget. Anchoring (``^``) is the load-bearing change
+# (Task 51): the old ``search()`` matched the pattern ANYWHERE in the line, so a
+# string literal (``print("MAX_RETRIES = 10")``), a docstring, or any embedded text
+# graded L2. A live assignment starts the line; a string/call/comment does not.
 _RETRY_BUDGET_LINE = re.compile(
-    r"(retr(y|ies)|max[_ ]?tries|attempts|backoff)\w*\s*[:=]\s*(\d+)",
+    r"^([A-Za-z_][A-Za-z0-9_.]*(?:retr(?:y|ies)|max[_ ]?tries|attempts|backoff)[A-Za-z0-9_]*)"
+    r"\s*[:=]\s*(\d+)\s*$",
     re.IGNORECASE,
 )
 
-# Leading comment markers: a budget assignment behind one of these is COMMENTED OUT,
-# so changing it removes nothing from the live code path (Codex re-review P2). We
-# reject a line whose first non-blank characters begin a comment.
-_COMMENT_PREFIX = re.compile(r"^\s*(#|//|--|;)")
+# Comment markers (line AND block): a budget assignment behind any of these is not a
+# live code path, so changing it removes nothing (Codex re-review P2 + Task 51 block
+# comments). Reject a line whose first non-blank chars begin a comment OR a string.
+_COMMENT_OR_STRING_PREFIX = re.compile(r'^\s*(#|//|--|;|/\*|\*|"""|\'\'\'|"|\')')
+
+
+def _retry_budget_assignment(content_lines: list[str]) -> tuple[str, int] | None:
+    """Return ``(identifier, value)`` for exactly ONE live retry-budget assignment in
+    *content_lines*, or None if zero / more-than-one (ambiguous -> reject). A line
+    behind a comment or string marker is NOT a live assignment and is skipped. The
+    regex is ANCHORED, so only a real start-of-line assignment matches — a string
+    literal / call / embedded text does not."""
+    found: list[tuple[str, int]] = []
+    for line in content_lines:
+        stripped = line.strip()
+        if _COMMENT_OR_STRING_PREFIX.match(stripped) is not None:
+            continue
+        m = _RETRY_BUDGET_LINE.match(stripped)
+        if m is not None:
+            found.append((m.group(1), int(m.group(2))))
+    return found[0] if len(found) == 1 else None
 
 
 def _retry_budget_value(content_lines: list[str]) -> int | None:
-    """Return the integer retry budget asserted by exactly one LIVE assignment line in
-    *content_lines*, or None if zero or more-than-one such line is present (ambiguous
-    -> reject). A commented-out budget line is NOT a live assignment — changing it
-    removes nothing — so lines beginning with a comment marker are skipped."""
-    values = [
-        int(m.group(3))
-        for line in content_lines
-        if _COMMENT_PREFIX.match(line) is None
-        and (m := _RETRY_BUDGET_LINE.search(line)) is not None
-    ]
-    return values[0] if len(values) == 1 else None
+    """Back-compat shim: the integer of the single live retry-budget assignment."""
+    a = _retry_budget_assignment(content_lines)
+    return a[1] if a is not None else None
 
 
 def _model_priced_run(bundle: TraceBundle) -> bool:
