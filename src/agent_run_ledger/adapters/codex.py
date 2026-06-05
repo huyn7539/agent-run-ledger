@@ -373,6 +373,11 @@ def _parse_exit_code(output: Any) -> int | None:
 
 
 def _outputs_by_call_id(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map each call_id to its FIRST output (B2). On untrusted logs a duplicate
+    output must NOT overwrite the original: a hostile/corrupt rollout appending a
+    later exit-0 for a call_id that originally FAILED would otherwise erase the
+    failure (last-write-wins) and silently suppress retry detection. First write wins
+    — the original recorded result is authoritative; later duplicates are ignored."""
     by_id: dict[str, dict[str, Any]] = {}
     for rec in records:
         payload = rec.get("payload")
@@ -380,7 +385,7 @@ def _outputs_by_call_id(records: list[dict[str, Any]]) -> dict[str, dict[str, An
             continue
         if payload.get("type") in _TOOL_OUTPUT_TYPES:
             call_id = payload.get("call_id")
-            if call_id is not None:
+            if call_id is not None and str(call_id) not in by_id:
                 by_id[str(call_id)] = rec
     return by_id
 

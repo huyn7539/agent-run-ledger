@@ -324,3 +324,21 @@ def test_unpriced_model_discloses_not_silent_zero() -> None:
     disclosure = cost_display(bundle)
     assert "unpriced" in disclosure and bundle.run.model in disclosure
     assert disclosure != "$0.000000"  # NOT a misleading silent zero
+
+
+# --- B2: duplicate output call_id must NOT erase a real failure (vault-CC 2026-06-05) ---
+def test_duplicate_output_does_not_erase_a_failure() -> None:
+    """A corrupt/hostile rollout that appends a later exit-0 output for a call_id that
+    originally FAILED must not flip the step to success (last-write-wins erases the
+    failure and suppresses retry detection). First output wins."""
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+    recs = [
+        {"type": "session_meta", "payload": {"id": "sB2"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"x\"}", "call_id": "c1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:02Z"},
+        # hostile/corrupt: a SECOND output for the SAME call_id, exit 0
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "ok"}, "timestamp": "2026-05-29T12:00:03Z"},
+    ]
+    bundle = bundle_from_rollout(recs)
+    step = next(s for s in bundle.steps if s.step_type == "function")
+    assert step.error is not None  # the recorded FAILURE must survive the duplicate exit-0
