@@ -199,3 +199,46 @@ def test_clean_session_yields_zero_prescriptions() -> None:
     represent legitimate work; neither may emit a prescription."""
     assert analyze_bundle(_bundle("abstain_fix_then_rerun.jsonl")) == []
     assert analyze_bundle(_bundle("abstain_same_turn_fanout.jsonl")) == []
+
+
+# --- A1: user-message boundary must break the retry continuation (vault-CC, 2026-06-05) ---
+def _rollout_user_directed_reruns() -> list[dict]:
+    """Same exec_command fails, the USER says 'please rerun', it fails again, user
+    again, then it succeeds. A user DIRECTING the reruns is NOT a blind retry loop."""
+    return [
+        {"type": "session_meta", "payload": {"id": "sessUB"}},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\"}", "call_id": "c1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c1", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:02Z"},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "please rerun"}, "timestamp": "2026-05-29T12:00:03Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\"}", "call_id": "c2"}, "timestamp": "2026-05-29T12:00:04Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c2", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:05Z"},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "again"}, "timestamp": "2026-05-29T12:00:06Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"pytest\"}", "call_id": "c3"}, "timestamp": "2026-05-29T12:00:07Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "c3", "output": "ok"}, "timestamp": "2026-05-29T12:00:08Z"},
+    ]
+
+
+def test_user_directed_reruns_do_not_false_fire_retry() -> None:
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+    from agent_run_ledger.core.prescriptions import analyze_bundle
+    bundle = bundle_from_rollout(_rollout_user_directed_reruns())
+    assert analyze_bundle(bundle) == []  # user directed the reruns -> NOT a blind retry loop
+
+
+def test_unrelated_user_message_does_not_suppress_a_genuine_retry() -> None:
+    """Over-abstain guard: a user message that is NOT between the repeated calls must
+    NOT suppress a genuine no-boundary retry."""
+    from agent_run_ledger.adapters.codex import bundle_from_rollout
+    from agent_run_ledger.core.prescriptions import analyze_bundle
+    recs = [
+        {"type": "session_meta", "payload": {"id": "sessG"}},
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "fix the crm bug"}, "timestamp": "2026-05-29T12:00:00Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"crm\"}", "call_id": "g1"}, "timestamp": "2026-05-29T12:00:01Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "g1", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:02Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"crm\"}", "call_id": "g2"}, "timestamp": "2026-05-29T12:00:03Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "g2", "output": "Exit code: 1"}, "timestamp": "2026-05-29T12:00:04Z"},
+        {"type": "response_item", "payload": {"type": "function_call", "name": "exec_command", "arguments": "{\"cmd\":\"crm\"}", "call_id": "g3"}, "timestamp": "2026-05-29T12:00:05Z"},
+        {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "g3", "output": "ok"}, "timestamp": "2026-05-29T12:00:06Z"},
+    ]
+    bundle = bundle_from_rollout(recs)
+    assert len(analyze_bundle(bundle)) == 1  # genuine autonomous retry STILL fires

@@ -82,6 +82,13 @@ MAX_ROLLOUT_LINES = 500_000
 # function step, never dropped or demoted to a non-function kind.
 _TOOL_CALL_TYPES = ("function_call", "custom_tool_call")
 _TOOL_OUTPUT_TYPES = ("function_call_output", "custom_tool_call_output")
+# A user/instruction message between repeated tool calls means the human DIRECTED
+# the rerun -> NOT an autonomous (blind) retry loop. The adapter bumps the retry
+# "segment" on this boundary so calls before vs. after land in DIFFERENT
+# retry_scopes; core then refuses to collapse across the boundary (retries.py:
+# "a handoff to a DIFFERENT scope must NOT collapse"). Core stays provider-neutral
+# -- the user-boundary concept lives ONLY here in the adapter (A1, vault-CC 2026-06-05).
+_USER_MESSAGE_TYPES = ("user_message",)
 
 # Exit-status phrasings seen on real outputs:
 #   function_call_output:      "Process exited with code N"
@@ -227,6 +234,7 @@ def _steps_from_records(
     # the open turn (a same-turn fan-out). Walk the records in order.
     turn_index = 0
     turn_open = False  # has a call been emitted in the current (un-closed) turn?
+    segment = 0  # bumped on a user-message boundary; partitions retry_scope (A1)
     steps: list[StepRecord] = []
     call_seq = 0
 
@@ -235,6 +243,15 @@ def _steps_from_records(
         if not isinstance(payload, dict):
             continue
         ptype = payload.get("type")
+        if ptype in _USER_MESSAGE_TYPES:
+            # A user instruction. If it falls between repeated tool calls, the human
+            # DIRECTED the rerun -> not an autonomous retry. Bump the segment so the
+            # next call's retry_scope differs from the prior call's; core then won't
+            # collapse across this boundary. Also close the turn (model re-engages
+            # after the user). Core is untouched (provider-neutral invariant).
+            segment += 1
+            turn_open = False
+            continue
         if ptype in _TOOL_OUTPUT_TYPES:
             # A tool result: the model will be re-invoked -> close the turn so the
             # NEXT tool call starts a new one. (Multiple outputs in a row — e.g. a
@@ -258,6 +275,7 @@ def _steps_from_records(
                 run_id=run_id,
                 session_id=session_id,
                 turn_id=f"{session_id}:turn{turn_index}",
+                segment=segment,
                 seq=call_seq,
                 outputs=outputs,
             )
@@ -272,6 +290,7 @@ def _step_from_call(
     run_id: str,
     session_id: str,
     turn_id: str,
+    segment: int,
     seq: int,
     outputs: dict[str, dict[str, Any]],
 ) -> StepRecord:
@@ -305,8 +324,11 @@ def _step_from_call(
         ended_at=ended_at,
         # parent_step_id is the per-turn id the detector reads as turn_id.
         parent_step_id=turn_id,
-        # retry_scope is the stable session id (coarse-by-design; see module doc).
-        retry_scope=session_id,
+        # retry_scope is the session id PARTITIONED BY user-message segment: calls
+        # separated by a user instruction land in different scopes so core won't
+        # collapse a user-DIRECTED rerun as an autonomous retry loop (A1). Within one
+        # segment it is the stable session scope (coarse-by-design; see module doc).
+        retry_scope=f"{session_id}:seg{segment}",
         # input_fingerprint: a one-way digest of the raw tool input — content-free,
         # so a genuine retry (same input) is distinguishable from repetition without
         # storing the input.
