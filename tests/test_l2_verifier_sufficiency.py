@@ -310,3 +310,20 @@ def test_cross_file_constant_move_is_rejected() -> None:
 def test_single_file_genuine_cap_still_accepted_after_single_file_guard() -> None:
     """Regression: the single-file guard must not reject a genuine one-file cap diff."""
     assert _is_retry_cap_diff(_GENUINE) is True
+
+
+def test_duplicate_same_file_headers_are_rejected() -> None:
+    """Task 51 / Codex fleet Finding 1: a diff with DUPLICATED same-file headers
+    (`--- a/crm.py` twice) bypassed the distinct-path single-file guard. Require
+    exactly one `---`/`+++`/`@@` — duplicated headers must NOT grade as a cap diff."""
+    d = ("--- a/crm.py\n+++ b/crm.py\n--- a/crm.py\n+++ b/crm.py\n"
+         "@@ -1 +1 @@\n-MAX_RETRIES = 5\n+MAX_RETRIES = 0\n")
+    assert _is_retry_cap_diff(d) is False
+
+
+def test_multi_hunk_same_file_is_rejected() -> None:
+    """Tightened single-hunk guard: a real cap diff is one hunk. A second hunk (extra
+    change elsewhere in the same file) means the patch does more than bound the budget."""
+    d = ("--- a/crm.py\n+++ b/crm.py\n@@ -1 +1 @@\n-CRM_MAX_RETRIES = 10\n+CRM_MAX_RETRIES = 0\n"
+         "@@ -9 +9 @@\n-x = 1\n+x = 2\n")
+    assert _is_retry_cap_diff(d) is False
