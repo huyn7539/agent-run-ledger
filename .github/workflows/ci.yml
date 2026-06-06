@@ -14,3 +14,19 @@ jobs:
         run: uv run --with pytest pytest
       - name: Run ruff
         run: uv run --with ruff ruff check .
+
+  live-sdk-gate:
+    # The B1 demo-overfit guard (tests/test_live_capture_receipt.py) is gated by
+    # pytest.importorskip("agents"). Under the base `test` job (no openai extra)
+    # the SDK is absent, so the gate SKIPS — exit 0, silently un-enforced. This
+    # job installs the openai extra so the gate actually RUNS, and hard-fails if
+    # the SDK is somehow absent (importorskip would otherwise turn absent into a
+    # green skip). A skip of this honesty gate must be a CI failure, not a pass.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: SDK must be present (no silent skip)
+        run: uv run --extra openai python -c "import agents"
+      - name: B1 live-SDK honesty gate (real SDK run grades L1, not fixture L2)
+        run: uv run --extra openai --with pytest pytest tests/test_live_capture_receipt.py -v

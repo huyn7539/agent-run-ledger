@@ -5,8 +5,9 @@ from pathlib import Path
 
 from agent_run_ledger.core.compare import RunComparison
 from agent_run_ledger.core.cost import cost_display
-from agent_run_ledger.core.models import TraceBundle
+from agent_run_ledger.core.models import PrescriptionRecord, TraceBundle
 from agent_run_ledger.core.prescriptions import derive_retry_steps
+from agent_run_ledger.core.receipt import RepairReceipt, build_receipts
 
 
 def render_report(bundle: TraceBundle) -> str:
@@ -89,27 +90,69 @@ def render_comparison(comparison: RunComparison) -> str:
 
 
 def _render_prescriptions(bundle: TraceBundle) -> str:
-    if not bundle.prescriptions:
-        return "<h2>Recommended Next Test</h2><p>No prescriptions emitted.</p>"
-    cards = []
-    for item in bundle.prescriptions:
-        evidence = "".join(f"<li>{escape(line)}</li>" for line in item.evidence)
-        cards.append(
-            f"""
+    # The graded RepairReceipt is the PRODUCT — the honesty layer (proof level,
+    # claim, confidence, limits, next evidence) computed on read from the facts.
+    # build_receipts returns [] when there is no detected failure (the negative
+    # gate: no invented receipts on a clean run), so the empty list and the
+    # no-prescription branch are the SAME honest case.
+    receipts = build_receipts(bundle)
+    if not receipts:
+        return (
+            "<h2>Repair Receipt</h2>"
+            "<p>No fixable failure detected — clean run. ARL emits a graded repair "
+            "receipt only when it detects a fixable failure path; this run produced "
+            "none, so there is nothing to grade.</p>"
+        )
+    # Receipts and prescriptions are BOTH built from bundle.prescriptions in the same
+    # order, so zip pairs each receipt with the prescription it graded (its patch +
+    # regression test render as the SECONDARY details block under the receipt).
+    cards = [
+        _render_receipt_card(receipt, item)
+        for receipt, item in zip(receipts, bundle.prescriptions)
+    ]
+    return "\n".join(cards)
+
+
+def _render_receipt_card(receipt: RepairReceipt, item: PrescriptionRecord) -> str:
+    """Render ONE graded receipt as the PRIMARY block, with the raw prescription
+    artifact (patch, expected impact, regression test) kept as a SECONDARY details
+    block beneath it. The honesty layer leads; the artifact follows."""
+    # PRIMARY: the graded receipt. The limits list is shown PROMINENTLY (a visible
+    # <ul>, never hidden) — it is the core of what the receipt sells.
+    limits = "".join(f"<li>{escape(line)}</li>" for line in receipt.limits)
+    next_evidence = "".join(f"<li>{escape(line)}</li>" for line in receipt.next_evidence)
+    receipt_evidence = "".join(f"<li>{escape(line)}</li>" for line in receipt.evidence)
+    # SECONDARY: the raw prescription artifact (root cause + patch + regression test
+    # are kept, not deleted — the receipt is ADDED above them).
+    rx_evidence = "".join(f"<li>{escape(line)}</li>" for line in item.evidence)
+    return f"""
             <section>
-              <h2 class="warn">Recommended Next Test: {escape(item.one_line_fix)}</h2>
-              <p><strong>Severity:</strong> {escape(item.severity)}</p>
-              <p><strong>Patch type:</strong> {escape(item.patch_type)}</p>
-              <p><strong>Root cause:</strong> {escape(item.root_cause)}</p>
-              <h3>Evidence</h3>
-              <ul>{evidence}</ul>
-              <h3>Patch Artifact</h3>
-              <pre>{escape(item.patch)}</pre>
-              <h3>Expected Impact</h3>
-              <pre>{escape(str(item.expected_impact))}</pre>
-              <h3>Regression Test Template</h3>
-              <pre>{escape(item.regression_test_template)}</pre>
+              <h2 class="warn">Repair Receipt: {escape(item.one_line_fix)}</h2>
+              <p><strong>Proof level:</strong> {escape(receipt.proof_level)}</p>
+              <p><strong>Confidence:</strong> {escape(receipt.confidence)}</p>
+              <p><strong>Observed failure:</strong> {escape(receipt.observed_failure)}</p>
+              <p><strong>Claim:</strong> {escape(receipt.claim)}</p>
+              <h3>Limits</h3>
+              <ul>{limits}</ul>
+              <h3>Next Evidence</h3>
+              <ul>{next_evidence}</ul>
+              <h3>Outcome Delta</h3>
+              <pre>{escape(str(receipt.outcome_delta))}</pre>
+              <h3>Receipt Evidence</h3>
+              <ul>{receipt_evidence}</ul>
+              <details>
+                <summary>Prescription artifact (details)</summary>
+                <p><strong>Severity:</strong> {escape(item.severity)}</p>
+                <p><strong>Patch type:</strong> {escape(item.patch_type)}</p>
+                <p><strong>Root cause:</strong> {escape(item.root_cause)}</p>
+                <h3>Evidence</h3>
+                <ul>{rx_evidence}</ul>
+                <h3>Patch Artifact</h3>
+                <pre>{escape(item.patch)}</pre>
+                <h3>Expected Impact</h3>
+                <pre>{escape(str(item.expected_impact))}</pre>
+                <h3>Regression Test Template</h3>
+                <pre>{escape(item.regression_test_template)}</pre>
+              </details>
             </section>
             """
-        )
-    return "\n".join(cards)

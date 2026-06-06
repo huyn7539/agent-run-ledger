@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agent_run_ledger.core.cost import cost_on_read
 from agent_run_ledger.core.models import TraceBundle
 from agent_run_ledger.core.prescriptions import derive_retry_steps
 
@@ -43,7 +44,10 @@ def compare_bundles(left: TraceBundle, right: TraceBundle) -> RunComparison:
     return RunComparison(
         left_run_id=left.run.id,
         right_run_id=right.run.id,
-        cost_delta_usd=right.run.total_cost_usd - left.run.total_cost_usd,
+        # LR2: total_cost_usd is a CACHE, not authoritative — a stale cache can
+        # flip the SIGN of this delta vs report/list. Compute from cost_on_read
+        # (token facts x stub price table), the same source report + list use.
+        cost_delta_usd=cost_on_read(right) - cost_on_read(left),
         latency_delta_ms=right.run.total_latency_ms - left.run.total_latency_ms,
         input_token_delta=right.run.total_input_tokens - left.run.total_input_tokens,
         output_token_delta=right.run.total_output_tokens - left.run.total_output_tokens,

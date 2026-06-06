@@ -56,7 +56,10 @@ def test_report_html_escapes_user_fields_and_preserves_emoji() -> None:
 def test_no_prescriptions_section_renders() -> None:
     html = render_report(load_trace(Path("fixtures/clean_run.json")))
 
-    assert "No prescriptions emitted." in html
+    # A clean run has no detected failure, so build_receipts() returns [] and the
+    # report renders the honest no-fixable-failure message instead of a graded
+    # repair receipt (the receipt is now the primary block; report.py).
+    assert "No fixable failure detected" in html
 
 
 def test_report_numeric_fields_do_not_render_nan() -> None:
@@ -72,11 +75,19 @@ def test_compare_deltas_and_formatting() -> None:
     comparison = compare_bundles(left, right)
     rendered = render_comparison(comparison)
 
-    assert comparison.cost_delta_usd == right.run.total_cost_usd - left.run.total_cost_usd
+    # LR2 (Task 52 item 2): cost_delta is computed on read from token facts, the
+    # SAME source report + list use — NOT the cached total_cost_usd. On these
+    # fixtures the cached totals (0.1842, 0.071) are stale vs what the tokens
+    # actually price to (0.00472, 0.00248), so the cached delta (-0.1132) is ~50x
+    # the true on-read delta (-0.00224). Asserting the on-read delta is what keeps
+    # compare in agreement with report/list.
+    from agent_run_ledger.core.cost import cost_on_read
+
+    assert comparison.cost_delta_usd == cost_on_read(right) - cost_on_read(left)
     assert comparison.latency_delta_ms == right.run.total_latency_ms - left.run.total_latency_ms
     assert comparison.retry_delta == -4
     assert comparison.success_change == "failed -> passed"
-    assert "cost_delta_usd: -0.113200" in rendered
+    assert "cost_delta_usd: -0.002240" in rendered
     assert "success_change: failed -> passed" in rendered
 
 

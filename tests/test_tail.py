@@ -42,7 +42,10 @@ def test_single_step_bundle_load_save_report_no_rx(tmp_path: Path) -> None:
     loaded = load_bundle(db, run_id)
 
     assert analyze_bundle(loaded) == []
-    assert "No prescriptions emitted." in render_report(loaded)
+    # A clean run yields no receipt: the report renders the honest no-fixable-
+    # failure message in place of a graded repair receipt (report.py now leads with
+    # the RepairReceipt; the empty-receipt case is the same honest clean-run case).
+    assert "No fixable failure detected" in render_report(loaded)
 
 
 def test_extreme_token_counts_roundtrip(tmp_path: Path) -> None:
