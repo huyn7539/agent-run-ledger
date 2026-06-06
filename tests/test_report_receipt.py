@@ -19,6 +19,7 @@ the demo must show its real grade, never an inflated L2.
 from __future__ import annotations
 
 from agent_run_ledger.core.demo import load_demo_bundle
+from agent_run_ledger.core.models import RunRecord, StepRecord, TraceBundle
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.receipt import build_receipts
 from agent_run_ledger.core.report import render_report
@@ -70,9 +71,81 @@ def test_report_keeps_patch_and_regression_test_as_secondary() -> None:
     assert rx.patch.splitlines()[0] in html
 
 
+def test_report_receipt_leads_artifact_follows_in_details() -> None:
+    """Item 1 has TWO halves: (a) the graded receipt is PRIMARY, and (b) the raw
+    prescription artifact is DEMOTED into a <details> block beneath it. Half (b)
+    must be pinned by an assertion, not just the test name — a regression that
+    pulls the artifact back to primary, or drops the receipt's primacy, must fail.
+    """
+    bundle = _demo_retry_bundle()
+    html = render_report(bundle)
+
+    assert "<details>" in html
+    assert "<summary>" in html
+    # The receipt (Proof level) must appear BEFORE the demoted artifact block.
+    assert html.index("Proof level") < html.index("<details>")
+    # The patch artifact lives INSIDE the details block, not above it.
+    assert html.index("<details>") < html.index("Patch Artifact")
+
+
+def _failed_non_retry_bundle() -> TraceBundle:
+    """A run that FAILED for a non-retry reason (a timeout, no retry loop) -> ARL
+    emits NO prescription. This is the MODAL concierge-demo input: real user
+    sessions overwhelmingly fail for non-retry reasons (context drift, claim-
+    evidence mismatch, weak gates), so this empty-prescription path is the DEFAULT
+    real-session case, not an edge case."""
+    run = RunRecord(
+        id="run_failed_timeout",
+        workflow="w",
+        framework="f",
+        provider="openai",
+        model="gpt-4o",
+        started_at="2026-06-06T00:00:00Z",
+        ended_at="2026-06-06T00:00:01Z",
+        success_label="failed",
+        total_cost_usd=0.01,
+        total_input_tokens=1000,
+        total_output_tokens=200,
+    )
+    step = StepRecord(
+        id="run_failed_timeout_s1",
+        run_id="run_failed_timeout",
+        step_type="tool",
+        name="fetch",
+        started_at=run.started_at,
+        ended_at=run.ended_at,
+        input_tokens=1000,
+        output_tokens=200,
+        retry_count=0,
+        error="Timeout",
+        error_class="Timeout",
+    )
+    return TraceBundle(run=run, steps=[step])
+
+
+def test_failed_non_retry_run_does_not_claim_clean() -> None:
+    """THE honesty blocker (Codex + code-reviewer fleet): a run that FAILED on a
+    non-retry class produces no prescription, so build_receipts is []. The report
+    must NOT then claim 'clean run' — that contradicts the metrics row (Errors: 1,
+    Outcome: failed) in the SAME document, and it fires on the modal real-session
+    input. ARL must never say a failed run was clean."""
+    bundle = _failed_non_retry_bundle()
+    assert build_receipts(bundle) == []  # no retry loop -> no prescription
+
+    html = render_report(bundle)
+
+    # The metrics row must (still) show the failure honestly.
+    assert "Outcome:</strong> failed" in html
+    # And the receipt section must NOT call a failed run "clean".
+    assert "clean run" not in html.lower()
+    # It must say something true: no retry-cap receipt / out of scope for this run.
+    assert "Repair Receipt" in html
+
+
 def test_clean_run_reports_honest_no_fixable_failure() -> None:
     """build_receipts returns [] on a clean run (no prescription). The report must
-    say so honestly — never invent a receipt on a clean run."""
+    say so honestly — never invent a receipt on a clean run. The genuinely-clean
+    case (passed, no errors) is the ONLY case allowed to say 'clean run'."""
     clean = load_demo_bundle("clean")
     assert build_receipts(clean) == []
 

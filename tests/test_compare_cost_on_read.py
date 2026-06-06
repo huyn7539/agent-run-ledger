@@ -37,9 +37,11 @@ _RIGHT_CACHED_TOTAL = 0.01
 def _bundle(run_id: str, tokens: tuple[int, int], cached_total: float) -> TraceBundle:
     """A valid single-step gpt-4o bundle with REAL tokens and a chosen cached total.
 
-    Built via the dataclass constructors (not from_dict) so the deliberately
-    inconsistent cached total_cost_usd survives — from_dict runs
-    _with_computed_totals + validate(), which would normalize/clobber it.
+    Built via the dataclass constructors directly (not from_dict) to keep the test
+    construction explicit and independent of the deserialization path — we set the
+    cached total_cost_usd and the token facts on the records ourselves, so the
+    divergence between the cached total and the on-read (token-derived) cost is
+    exactly what we intend, with no deserialization step in between.
     """
     input_tokens, output_tokens = tokens
     run = RunRecord(

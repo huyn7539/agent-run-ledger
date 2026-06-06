@@ -64,9 +64,12 @@ def render_report(bundle: TraceBundle) -> str:
     <span class="metric"><strong>Outcome:</strong> {escape(bundle.run.success_label)}</span>
   </div>
   <h2>Steps</h2>
+  <p style="color:#555;font-size:0.9em">Per-step cost is the adapter/cached
+  estimate and may not sum to the headline Cost above, which is computed on read
+  from token facts. The headline figure is the authoritative one.</p>
   <table>
     <thead>
-      <tr><th>ID</th><th>Type</th><th>Name</th><th>Tokens</th><th>Cost</th><th>Retries</th><th>Error</th></tr>
+      <tr><th>ID</th><th>Type</th><th>Name</th><th>Tokens</th><th>Cost (cached est.)</th><th>Retries</th><th>Error</th></tr>
     </thead>
     <tbody>{step_rows}</tbody>
   </table>
@@ -97,15 +100,42 @@ def _render_prescriptions(bundle: TraceBundle) -> str:
     # no-prescription branch are the SAME honest case.
     receipts = build_receipts(bundle)
     if not receipts:
+        # No prescription -> no receipt. But "no receipt" is NOT "clean run": this
+        # slice only DETECTS the retry-cap class, so a run that FAILED for another
+        # reason (timeout, schema error, context drift) also yields zero receipts.
+        # Claiming "clean run" on such a run would contradict the metrics row
+        # (Errors/Outcome) in this same document AND fire on the modal real-session
+        # input (real sessions fail mostly for non-retry reasons). Only call a run
+        # clean when it actually passed with no errors; otherwise say, honestly,
+        # that this run's failure is outside the one class ARL currently grades.
+        derived = derive_retry_steps(bundle)
+        has_errors = any(step.error for step in derived)
+        if bundle.run.success_label == "passed" and not has_errors:
+            return (
+                "<h2>Repair Receipt</h2>"
+                "<p>No fixable failure detected — clean run. ARL emits a graded "
+                "repair receipt only when it detects a fixable failure path; this "
+                "run produced none, so there is nothing to grade.</p>"
+            )
         return (
             "<h2>Repair Receipt</h2>"
-            "<p>No fixable failure detected — clean run. ARL emits a graded repair "
-            "receipt only when it detects a fixable failure path; this run produced "
-            "none, so there is nothing to grade.</p>"
+            "<p>No retry-cap repair receipt for this run. ARL's current slice grades "
+            "the retry-loop class only; this run did not match that class, so there is "
+            "no graded receipt — this is <strong>not</strong> a clean-run claim (see "
+            "the run outcome and errors above). Other failure classes are out of scope "
+            "for this slice.</p>"
         )
     # Receipts and prescriptions are BOTH built from bundle.prescriptions in the same
     # order, so zip pairs each receipt with the prescription it graded (its patch +
     # regression test render as the SECONDARY details block under the receipt).
+    # Guard the invariant explicitly: if a future code path ever filters receipts,
+    # a bare zip() would SILENTLY truncate and mis-pair receipts to prescriptions
+    # (showing the wrong patch under a grade) — fail loud instead (fleet INFO ×3).
+    if len(receipts) != len(bundle.prescriptions):
+        raise ValueError(
+            f"receipt/prescription count mismatch: {len(receipts)} receipts vs "
+            f"{len(bundle.prescriptions)} prescriptions — pairing would be unsafe"
+        )
     cards = [
         _render_receipt_card(receipt, item)
         for receipt, item in zip(receipts, bundle.prescriptions)
