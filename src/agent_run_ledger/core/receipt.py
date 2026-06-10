@@ -45,6 +45,18 @@ from agent_run_ledger.core.prescriptions import derive_retry_steps
 # Closed proof ladder (the SHAPE is locked; this slice grades only L0–L2).
 PROOF_LEVELS: tuple[str, ...] = ("L0", "L1", "L2", "L3", "L4", "L5", "L6")
 
+# Codex P1 (2026-06-11): artifact_failure FACTS (deletes_test_path,
+# completion_claim_follows, user_directed_deletion) are only trustworthy when an
+# ADAPTER computed them in-process from real session content. A neutral JSON
+# import lets a hostile author hand-supply those booleans, so a forged file could
+# claim an artifact_failure at L1 against a stranger it's accusing. Artifact
+# grading is therefore gated on the run having come through a known capture
+# adapter (framework set by the adapter, not by the imported file). The neutral
+# schema default is "unknown-framework"; the recorded-trace import path does not
+# compute these facts. This mirrors the retry path's "grade from derived facts,
+# never the evidence string" discipline (Task 51), applied to the import boundary.
+_ADAPTER_PROVENANCED_FRAMEWORKS: frozenset[str] = frozenset({"claude-code", "codex-cli"})
+
 # A receipt's failure label is a bounded vocabulary (proof-ladder doc).
 OBSERVED_FAILURES: tuple[str, ...] = (
     "retry_loop",
@@ -148,8 +160,16 @@ def _artifact_rule(evidence: list[str]) -> str | None:
     return next(iter(labels)) if len(labels) == 1 else None
 
 
-def _grade_artifact_failure(rx: PrescriptionRecord, raw_by_id: dict[str, StepRecord]) -> str:
-    """L1 only for a fact-corroborated R1; everything else L0 (fail closed)."""
+def _grade_artifact_failure(
+    rx: PrescriptionRecord, raw_by_id: dict[str, StepRecord], adapter_provenanced: bool
+) -> str:
+    """L1 only for a fact-corroborated R1 from an adapter-provenanced run; else L0.
+
+    Codex P1: the corroborating booleans are only facts when an adapter computed
+    them. On a neutral/forged import (``adapter_provenanced`` False) the strongest
+    honest grade is L0 — ARL will not L1-accuse on attacker-supplied booleans."""
+    if not adapter_provenanced:
+        return "L0"
     rule = _artifact_rule(rx.evidence)
     if rule != "R1":
         return "L0"
@@ -177,7 +197,8 @@ def _artifact_failure_receipt(
     bundle: TraceBundle, rx: PrescriptionRecord, raw_by_id: dict[str, StepRecord]
 ) -> RepairReceipt:
     rule = _artifact_rule(rx.evidence)
-    proof_level = _grade_artifact_failure(rx, raw_by_id)
+    adapter_provenanced = bundle.run.framework in _ADAPTER_PROVENANCED_FRAMEWORKS
+    proof_level = _grade_artifact_failure(rx, raw_by_id, adapter_provenanced)
     return RepairReceipt(
         run_id=bundle.run.id,
         claim=_artifact_claim(rule, proof_level),
@@ -288,15 +309,25 @@ def _grade_retry_cap(patch_type: str, patch: str, observed_retry_count: int | No
     config_diff fallback (no file/line target) -> L1. Anything else -> L0."""
     if patch_type == "unified_diff" and _is_retry_cap_diff(patch):
         new_budget = _new_cap_value(patch)
-        # Fail closed: unrecoverable new cap or observed count -> not L2.
-        if new_budget is None or observed_retry_count is None:
+        # Fail closed: unrecoverable new cap or observed count -> not L2. But L1
+        # (relevance) still requires a CORROBORATED observed loop — a unified diff
+        # with no recoverable observed count is L0, not a free L1 (Codex P1).
+        if observed_retry_count is None:
+            return "L0"
+        if new_budget is None:
             return "L1"
         # The new cap must drop the loop BELOW the observed additional-attempt count.
         if new_budget < observed_retry_count:
             return "L2"
         return "L1"
     if patch_type == "config_diff":
-        return "L1"
+        # Codex P1: config_diff is the non-runnable fallback (no file/line target),
+        # so it can never reach L2 — but L1 (relevance to the observed loop) is only
+        # honest when the observed retry count is CORROBORATED from the real cited
+        # step. A forged/uncorroborated prescription (observed_retry_count is None)
+        # grades L0 (diagnostic), never a free L1. Was: unconditional L1 — that let a
+        # fabricated config_diff prescription claim relevance it hadn't earned.
+        return "L1" if observed_retry_count is not None else "L0"
     return "L0"
 
 

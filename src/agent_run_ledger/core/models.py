@@ -91,6 +91,25 @@ _ALLOWED_METADATA_KEYS = {
     "usage",
     "user_directed_deletion",
 }
+
+# Codex P1 (2026-06-11): the Task 58 fact keys are CONTENT-FREE BY CONTRACT — only
+# a boolean is meaningful. An allowlisted KEY is not enough: a hostile/buggy adapter
+# (or a forged neutral import) could put a raw command string under
+# ``deletes_test_path`` and it would round-trip through sqlite + JSON export
+# verbatim (the leak). So these keys are coerced to ``bool`` at the sanitize
+# boundary — a string/number/object becomes True/False, never stored as text. This
+# closes the leak STRUCTURALLY (the type system enforces content-freeness) rather
+# than trusting every writer. Detection reads only the boolean, so coercion is
+# lossless for the legitimate fact and lethal to a smuggled payload.
+_BOOLEAN_FACT_KEYS = frozenset(
+    {
+        "change_request",
+        "completion_claim_follows",
+        "deletes_test_path",
+        "mutating",
+        "user_directed_deletion",
+    }
+)
 _SAFE_ERROR_MESSAGE = "details redacted"
 
 # L6: a hash-or-empty token — empty string, or a lowercase hex string. The
@@ -645,10 +664,14 @@ def _sanitize_metadata_value(value: Any) -> Any:
         clean: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
-            if _is_allowed_metadata_key(key_text):
-                clean[key_text] = _sanitize_metadata_value(item)
-            else:
+            if not _is_allowed_metadata_key(key_text):
                 continue
+            # Codex P1: content-free fact keys are forced to bool — a smuggled
+            # string/object under one of these keys can never reach storage as text.
+            if key_text.lower() in _BOOLEAN_FACT_KEYS:
+                clean[key_text] = bool(item) if not isinstance(item, str) else item.strip().lower() in ("true", "1", "yes")
+            else:
+                clean[key_text] = _sanitize_metadata_value(item)
         return clean
     if isinstance(value, list):
         return [_sanitize_metadata_value(item) for item in value]

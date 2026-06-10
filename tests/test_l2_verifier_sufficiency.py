@@ -149,8 +149,9 @@ def test_stale_full_phrase_in_a_larger_evidence_string_does_not_supply_a_count()
     phrase embedded in a larger free-text note. A stored/imported prescription whose
     ONLY matching line is `"stale note from old run: retry_count=99 additional
     attempts"` (with NO genuine ARL evidence line) supplies no observed count ->
-    sufficiency is unrecoverable -> fail closed to L1, even though the cap (->5)
-    lowers from 10."""
+    sufficiency is unrecoverable -> fail closed to L0 (Codex P1 2026-06-11: an
+    unrecoverable observed count is a DIAGNOSTIC, not a free L1 relevance claim),
+    even though the cap (->5) lowers from 10."""
     bundle = _bundle_with_prescription(observed_retry_count=2, before_val=10, after_val=5)
     rx = bundle.prescriptions[0]
     poisoned = PrescriptionRecord(
@@ -163,9 +164,10 @@ def test_stale_full_phrase_in_a_larger_evidence_string_does_not_supply_a_count()
     )
     bundle = bundle.with_prescriptions([poisoned])
     receipts = build_receipts(bundle)
-    assert receipts[0].proof_level == "L1", (
+    assert receipts[0].proof_level == "L0", (
         "a stale full phrase inside a free-text note must not supply the observed "
-        "count; with no genuine ARL evidence line, sufficiency is unrecoverable -> L1"
+        "count; with no genuine ARL evidence line, sufficiency is unrecoverable -> L0 "
+        "(unrecoverable = diagnostic, never a free relevance claim — Codex P1)"
     )
 
 
@@ -219,7 +221,11 @@ def test_no_cited_step_fails_closed_to_l1() -> None:
     )
     bundle = bundle.with_prescriptions([no_step])
     receipts = build_receipts(bundle)
-    assert receipts[0].proof_level == "L1", "no resolvable cited step -> fail closed to L1"
+    assert receipts[0].proof_level == "L0", (
+        "no resolvable cited step -> sufficiency unrecoverable -> fail closed to L0 "
+        "(Codex P1: a unified diff with no corroborated observed count is diagnostic, "
+        "not a free L1)"
+    )
 
 
 # --- Task 51: L2 verifier parse-not-search hardening (vault-CC 2026-06-05) ---
@@ -275,8 +281,13 @@ def test_forged_evidence_retry_count_cannot_upgrade_to_l2() -> None:
     )
     bundle = bundle.with_prescriptions([forged])
     receipts = build_receipts(bundle)
-    # forged 99 must be ignored; the real step's retry_count=2 means cap 5 is insufficient
-    assert receipts[0].proof_level == "L1"
+    # The claimed 99 DISAGREES with the cited step's real retry_count=2, so the
+    # observed count fails closed to None (poisoned prescription). Under Codex P1,
+    # an unrecoverable observed count grades L0 (diagnostic) — NOT a free L1, and
+    # certainly not the L2 the forge was reaching for. The forge is fully defused
+    # either way; L0 is the stricter, more honest floor.
+    assert receipts[0].proof_level == "L0", receipts[0].proof_level
+    assert receipts[0].proof_level != "L2"
 
 
 def test_unicode_fullwidth_digit_is_rejected() -> None:

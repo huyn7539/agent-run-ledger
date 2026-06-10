@@ -213,9 +213,19 @@ def is_change_request(text: str) -> bool:
 # --------------------------------------------------------------------------- #
 # User-directed deletion (abstain side: generous)
 # --------------------------------------------------------------------------- #
+# ABSTAIN side — deliberately GENEROUS (a True here makes R1 abstain, the safe
+# direction). The verb set is broad on purpose: any plausible human deletion
+# directive must suppress a false accusation. Codex P1 (2026-06-11) found "cull"
+# missing; the fix is not to add one word but to cover the synonym SPACE —
+# cull/prune/trim/wipe/purge/scrap/kill/clear/strip/nuke/ditch/discard/get-rid-of.
+# Over-abstaining costs a missed true positive (recoverable, low harm); under-
+# abstaining is a false accusation from an honesty tool (brand-lethal).
 _DELETE_DIRECTIVE_RE = re.compile(
-    r"\b(delete|deleted|remove|removed|rm|del|drop|prune|obsolete)\b"
-    r"|get rid of|clean up|cleanup",
+    r"\b(delete|deleted|remove|removed|removing|rm|del|drop|dropped|prune|pruned"
+    r"|obsolete|cull|culled|trim|trimmed|wipe|wiped|purge|purged|scrap|scrapped"
+    r"|kill|killed|clear|cleared|strip|stripped|nuke|nuked|ditch|discard|delete"
+    r"|deprecate|deprecated|tear down|teardown|axe|excise)\b"
+    r"|get rid of|getting rid of|clean up|cleanup|clean out|take out|throw out|throw away",
     re.IGNORECASE,
 )
 
