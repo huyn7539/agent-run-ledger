@@ -389,6 +389,11 @@ def sweep(
     if not root.is_dir():
         console.print(f"error: sweep root is not a directory: {root}")
         raise typer.Exit(1)
+    # TODO(p2, Codex 2026-06-11): root.glob follows symlinks, so a symlinked .jsonl
+    # under the sweep root is read via its target (possibly outside root). Local
+    # read-only behavior, no egress; deferred to the parser-hardening pass. To close:
+    # skip entries where p.is_symlink() or resolve-and-bound to the root.
+    #
     # Codex P2/P3: bound ENUMERATION, not just the result slice. A hostile/huge tree
     # (millions of *.jsonl) must not be fully globbed+stat'd before slicing — that is
     # a DoS vector. Walk lazily and stop after _SWEEP_MAX_ENUM candidates; if we hit

@@ -27,13 +27,17 @@ def test_non_english_and_slang_deletion_directives_abstain() -> None:
     deleted = ["tests/test_billing.py"]
     for instruction in (
         "elimina estos archivos de prueba antiguos",   # Spanish (Latin verb list)
-        "lösche diese veralteten Testdateien bitte",   # German (non-Latin ö -> fallback)
+        "lösche diese veralteten Testdateien bitte",   # German imperative (fold)
+        "bitte löschen die alten tests",               # German infinitive (stem, Codex 1a)
         "удали этот устаревший тестовый файл",          # Russian (non-Latin -> fallback)
         "yeet these flaky test files please",          # slang (added verb)
         "torch the cache and the broken specs",        # slang (added verb)
         "🗑️ remove these obsolete test files for me",  # emoji + English directive
+        "please ԁelete the old tests",                 # Cyrillic-d homoglyph (Codex 1e)
+        "please de​lete the old tests",           # zero-width space mid-verb (1e)
+        "please de­lete the old tests",           # soft hyphen mid-verb (1e)
     ):
-        assert instruction_directs_deletion(instruction, deleted), instruction
+        assert instruction_directs_deletion(instruction, deleted), repr(instruction)
 
 
 # Guard the other side: a genuine from-scratch build request does NOT excuse an
