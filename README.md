@@ -52,19 +52,37 @@ Requires Python 3.12+.
 
 ## Quick Start
 
-See the alarm work first (a bundled known-bad run through the real pipeline),
-then grade your newest local agent session:
+Three commands, in this order:
 
 ```powershell
-arl selftest                  # proves a receipt fires — so 'clean' means something
+arl selftest                  # 1. proves a receipt fires — so 'clean' means something
+arl sweep ~/.claude/projects  # 2. grade months of sessions you ALREADY have
+arl init --hooks              # 3. every future session gets a verdict automatically
+```
+
+Start with the sweep, not today's session: the archive is where a receipt is most
+likely to fire, because ARL's value concentrates on the runs you are NOT watching —
+unattended loops, scheduled jobs, CI lanes, the overnight batch. If you read every
+diff interactively, expect clean verdicts; that is the detector abstaining, and it
+is the honest answer.
+
+Grade a single session any time:
+
+```powershell
 arl verdict --latest          # newest Codex CLI session
 arl verdict --latest-claude   # newest Claude Code session
 ```
 
-ARL's value concentrates on the runs you are NOT watching — unattended loops,
-scheduled jobs, CI lanes, the overnight batch. If you read every diff
-interactively, expect clean verdicts; that is the detector abstaining, and it is
-the honest answer.
+When you actually apply a receipt's fix, say so — it's the one metric this
+project measures itself by:
+
+```powershell
+arl mark-applied <run-id>
+```
+
+Update later with `uv tool upgrade agent-run-ledger` (or `pipx upgrade`). There
+is no auto-update and no update check — those need network calls, and ARL has
+none, structurally.
 
 Or the classic ledger flow:
 
@@ -167,8 +185,13 @@ silently skipped.
 
 **A Claude Code Stop hook (receipt on every finished session, zero remembered steps):**
 
+```powershell
+arl init --hooks    # installs the hook below into ./.claude/settings.json
+                    # (non-destructive merge; running it twice changes nothing)
+```
+
 ```jsonc
-// .claude/settings.json
+// what it installs — or paste it yourself:
 {
   "hooks": {
     "Stop": [

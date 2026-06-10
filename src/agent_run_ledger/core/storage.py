@@ -359,6 +359,35 @@ def list_runs(db_path: Path) -> list[RunRecord]:
     return [_run_from_row(row) for row in rows]
 
 
+def merge_run_outcome(db_path: Path, run_id: str, key: str, value: dict) -> str:
+    """Merge ``{key: value}`` into a run's ``outcome_json`` attach-point (LR1).
+
+    outcome_json is the judgment-side annotation slot on the immutable fact row
+    — the ONE runs column designed for post-hoc attachment (LR1), so this UPDATE
+    does not breach the insert-only discipline that protects provenance hashes
+    (which cover the captured facts, not this slot). Merge-only: other outcome
+    keys survive. Idempotent (Rule 5): if ``key`` is already present with the
+    same value, nothing is written and ``"already"`` is returned; a present key
+    with a DIFFERENT value also returns ``"already"`` (first write wins — an
+    applied-event is a fact about the past, not a mutable preference).
+    Raises ``KeyError`` for an unknown run.
+    """
+    init_db(db_path)
+    with connect(db_path) as conn:
+        row = conn.execute("SELECT outcome_json FROM runs WHERE id = ?", (run_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"run not found: {run_id}")
+        outcome = json.loads(row["outcome_json"]) if row["outcome_json"] else {}
+        if key in outcome:
+            return "already"
+        outcome[key] = value
+        conn.execute(
+            "UPDATE runs SET outcome_json = ? WHERE id = ?",
+            (json.dumps(outcome, sort_keys=True), run_id),
+        )
+    return "set"
+
+
 def _row_get(row: sqlite3.Row, key: str, default=None):
     """Read *key* from a Row, returning *default* if the column is absent.
 

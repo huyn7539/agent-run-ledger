@@ -119,12 +119,80 @@ def _warn_cloud_sync(db: Path) -> None:
         console.print(f"[yellow]{warning}[/yellow]")
 
 
+# The exact Stop-hook line from the README recipe — one source of truth so the
+# docs, the installer, and the tests can never drift apart.
+HOOK_COMMAND = "arl verdict --latest-claude --json >> .arl/verdicts.jsonl"
+
+
+def _install_stop_hook(target_dir: Path) -> str:
+    """Merge the ARL Stop hook into <dir>/.claude/settings.json.
+
+    Non-destructive: existing keys and existing hooks survive. Idempotent
+    (Rule 5): if the hook command is already present, NOTHING is written —
+    repeat calls are byte-level no-ops. Fail closed: unparseable settings.json
+    raises (the caller maps it to exit 1) and the file is never touched.
+    Returns "installed" or "already".
+    """
+    settings_path = target_dir / ".claude" / "settings.json"
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise ValueError(
+                f"existing {settings_path} is not valid JSON ({exc}); fix it by hand — "
+                "arl will not overwrite a file it cannot parse"
+            ) from exc
+        if not isinstance(settings, dict):
+            raise ValueError(f"existing {settings_path} is not a JSON object; not touching it")
+    else:
+        settings = {}
+    stop_entries = settings.setdefault("hooks", {}).setdefault("Stop", [])
+    existing = [
+        h.get("command")
+        for entry in stop_entries
+        if isinstance(entry, dict)
+        for h in entry.get("hooks", [])
+        if isinstance(h, dict)
+    ]
+    if HOOK_COMMAND in existing:
+        return "already"
+    stop_entries.append({"hooks": [{"type": "command", "command": HOOK_COMMAND}]})
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return "installed"
+
+
 @app.command("init")
-def init(db: Path = typer.Option(default_factory=default_db, help="SQLite database path.")) -> None:
+def init(
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    hooks: bool = typer.Option(
+        False,
+        "--hooks",
+        help="Also install the Claude Code Stop hook (project-local .claude/settings.json) "
+        "so every finished session gets a verdict automatically.",
+    ),
+    target_dir: Path = typer.Option(
+        Path("."), "--dir", help="Project directory for --hooks (default: current)."
+    ),
+) -> None:
     """Create the local ledger database (optional — verdict/sweep create it on demand)."""
     _warn_cloud_sync(db)
     init_db(db)
     console.print(f"initialized ledger: {db}")
+    if hooks:
+        try:
+            result = _install_stop_hook(target_dir)
+        except ValueError as exc:
+            console.print(f"error: {exc}")
+            raise typer.Exit(1) from exc
+        if result == "already":
+            console.print("Stop hook already installed — nothing changed.")
+        else:
+            console.print(
+                f"Stop hook installed in {target_dir / '.claude' / 'settings.json'}: "
+                f"every finished Claude Code session in this project now appends a "
+                f"verdict to .arl/verdicts.jsonl"
+            )
 
 
 @app.command("run-demo")
@@ -253,6 +321,32 @@ def list_runs_cmd(
             str(run.total_input_tokens + run.total_output_tokens),
         )
     console.print(table)
+
+
+@app.command("mark-applied")
+def mark_applied(
+    run_id: str = typer.Argument(..., help="Run id whose receipt's fix you applied."),
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    at: str = typer.Option(
+        "", "--at", help="ISO timestamp of the apply (default: now, UTC)."
+    ),
+) -> None:
+    """Record that you APPLIED a receipt's fix — the product's success metric.
+
+    Writes an applied-event into the run's outcome slot. First write wins;
+    marking the same run again changes nothing."""
+    from agent_run_ledger.core.models import utc_now_iso
+    from agent_run_ledger.core.storage import merge_run_outcome
+
+    try:
+        result = merge_run_outcome(db, run_id, "applied", {"at": at or utc_now_iso()})
+    except KeyError:
+        console.print(f"error: run not found: {run_id}")
+        raise typer.Exit(1) from None
+    if result == "already":
+        console.print(f"{run_id} is already marked applied — nothing changed.")
+    else:
+        console.print(f"marked applied: {run_id}")
 
 
 # The loop contract (Task 57): a hook / CI step / Ralph-style loop gates on these.
