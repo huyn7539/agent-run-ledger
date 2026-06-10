@@ -1,13 +1,30 @@
 [project]
 name = "agent-run-ledger"
 version = "0.2.0"
-description = "Local-first run ledger for AI agent cost, replay, compare, and fix artifacts."
+description = "Local-first verdict layer for AI coding-agent runs: graded repair receipts and a loop-gating exit code. Zero egress."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Hung Huynh" }]
+keywords = ["ai-agents", "claude-code", "codex", "verdict", "receipts", "local-first"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Quality Assurance",
+]
 requires-python = ">=3.12"
 dependencies = [
   "rich>=13.0",
   "typer>=0.12",
 ]
+
+[project.urls]
+Repository = "https://github.com/huyn7539/agent-run-ledger"
+Issues = "https://github.com/huyn7539/agent-run-ledger/issues"
 
 [project.optional-dependencies]
 openai = [

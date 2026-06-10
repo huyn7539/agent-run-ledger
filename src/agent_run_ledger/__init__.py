@@ -1,4 +1,6 @@
 """Agent Run Ledger."""
 
-__version__ = "0.1.0"
+# Single source of truth check: tests/test_version.py pins this to
+# pyproject.toml's [project].version — bump BOTH or the suite fails.
+__version__ = "0.2.0"
 

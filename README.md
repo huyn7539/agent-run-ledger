@@ -19,16 +19,25 @@ server, no telemetry, no network code in the package (enforced by tests).
 
 ## Install
 
-No account, no config, nothing leaves your machine. Pick whichever you have:
+No account, no config, nothing leaves your machine. Get the source, then pick
+whichever installer you have:
 
 ```bash
+git clone https://github.com/huyn7539/agent-run-ledger
+cd agent-run-ledger
+
 # with uv (https://docs.astral.sh/uv/) — installs the `arl` command on your PATH
 uv tool install .
 
 # or with pip / pipx
 pip install .            # into the current environment
 pipx install .           # isolated, on your PATH
+
+# or in one step, without a checkout
+uv tool install git+https://github.com/huyn7539/agent-run-ledger
 ```
+
+Check the install: `arl --version` (include this in any bug report).
 
 If `arl` isn't found after install (common on machines with several Pythons,
 where the `arl` on PATH may belong to a different interpreter), the always-correct
@@ -209,6 +218,31 @@ interactive sessions grade **clean**, which is the honest expected result — th
 target population is unattended/scheduled/CI runs, where waste hides. The current
 validation bar (2026-06-10): graded receipts produced on real users' real failures,
 measured by whether they **apply** the fix — not stars, not installs.
+
+## Reporting issues & sharing receipts
+
+ARL sends nothing home — so the only way we learn it misfired (or fired well) on
+your runs is if you tell us. The good news: everything ARL emits is **content-free
+by construction** (bounded labels, booleans, hashes, counts — never your prompts,
+code, or command text; enforced by the leak-matrix tests), so the outputs below
+are safe to paste into an issue:
+
+1. `arl --version` output.
+2. The full `--json` output of the verdict or sweep in question
+   (`arl verdict ... --json`, `arl sweep ... --json`).
+3. `arl selftest` output (proves the pipeline works on your machine).
+4. OS + Python version, and which agent produced the session (Claude Code /
+   Codex CLI / Agents SDK).
+
+What we most want to hear, in order: a receipt that was WRONG (false accusation
+is the worst bug this tool can have), a failure you know happened that ARL graded
+clean (a miss — name the session shape), and a receipt whose fix you actually
+applied (the success metric). Open a GitHub issue at
+`huyn7539/agent-run-ledger`, or reply in whatever thread brought you here.
+
+Do NOT paste your raw session `.jsonl` files — they contain your actual
+prompts and tool output. If a session is needed to reproduce a parser bug,
+`arl export --run <id> --out trace.json` produces the content-free neutral form.
 
 ## Private Alpha Definition
 

@@ -11,6 +11,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from agent_run_ledger import __version__
 from agent_run_ledger.adapters.claude_code import (
     ClaudeCodeSessionError,
     bundle_from_session,
@@ -57,6 +58,29 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        # Plain print, not the rich Console: must be safe before _safe_console()
+        # runs and trivially parseable in a bug report.
+        print(f"agent-run-ledger {__version__}")
+        raise typer.Exit(0)
+
+
+@app.callback()
+def _app_options(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        help="Print the ARL version and exit (include this in bug reports).",
+        callback=_version_callback,
+        is_eager=True,
+    ),
+) -> None:
+    pass
+
+
 def _safe_console() -> Console:
     """A Console that can NEVER crash human output on a legacy console encoding.
 
