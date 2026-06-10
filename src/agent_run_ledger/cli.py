@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, TypeVar
 
@@ -12,15 +13,18 @@ from rich.table import Table
 from agent_run_ledger.adapters.codex import (
     CodexRolloutError,
     bundle_from_rollout,
+    find_recent_rollouts,
     load_codex_rollout,
     looks_like_jsonl,
 )
+from agent_run_ledger.adapters.openai import NoSpansCapturedError, bundle_from_recorded_trace
 from agent_run_ledger.core.compare import compare_bundles
 from agent_run_ledger.core.cost import cost_display
 from agent_run_ledger.core.demo import load_demo_bundle
-from agent_run_ledger.core.io import TraceParseError, load_trace, write_trace
+from agent_run_ledger.core.io import TraceParseError, load_json_object, write_trace
 from agent_run_ledger.core.models import TraceBundle, TraceValidationError
 from agent_run_ledger.core.prescriptions import analyze_bundle
+from agent_run_ledger.core.receipt import PROOF_LEVELS, build_receipts
 from agent_run_ledger.core.report import render_comparison, write_report
 from agent_run_ledger.core.storage import (
     RunAlreadyRecorded,
@@ -70,14 +74,24 @@ def _load_any_trace(path: Path) -> TraceBundle:
 
     * a line-delimited JSON log (``.jsonl`` / multiple JSON objects) -> the Codex
       rollout adapter, which maps the provider log into the neutral TraceBundle;
-    * a single JSON object -> the existing TraceBundle path (``load_trace``).
+    * a single JSON object carrying ``trace`` + ``spans`` (and no ``run``) -> a
+      recorded OpenAI-SDK trace export -> the OpenAI adapter's
+      ``bundle_from_recorded_trace`` (pure parsing; no SDK dependency);
+    * any other single JSON object -> the neutral TraceBundle path.
 
-    The detection names no provider field — only the file shape — so the core
-    stays provider-neutral; the Codex-specific parsing lives entirely in the
-    adapter."""
+    The detection names no provider field — only the file SHAPE — so the core
+    stays provider-neutral; provider-specific parsing lives entirely in the
+    adapters. All single-object reads share ``load_json_object``'s defensive
+    size/depth/encoding bounds."""
     if looks_like_jsonl(path):
         return bundle_from_rollout(load_codex_rollout(path))
-    return load_trace(path)
+    data = load_json_object(path)
+    if "run" not in data and "trace" in data and "spans" in data:
+        return bundle_from_recorded_trace(data)
+    try:
+        return TraceBundle.from_dict(data)
+    except TraceValidationError as exc:
+        raise TraceParseError(f"invalid trace bundle: {exc}") from exc
 
 
 @app.command("import")
@@ -162,6 +176,97 @@ def list_runs_cmd(
     console.print(table)
 
 
+# The loop contract (Task 57): a hook / CI step / Ralph-style loop gates on these.
+# 0 = clean, 3 = receipt(s) fired, 1 = error (fail closed: unreadable is NOT clean).
+# 2 stays reserved for click/typer usage errors.
+EXIT_CLEAN = 0
+EXIT_RECEIPTS = 3
+VERDICT_SCHEMA = "arl.verdict/v1"
+
+
+@app.command("verdict")
+def verdict(
+    path: Path | None = typer.Argument(
+        None,
+        help="Trace file: single-object trace JSON or a Codex .jsonl rollout. Omit with --latest.",
+    ),
+    latest: bool = typer.Option(
+        False, "--latest", help="Grade the newest local Codex session rollout instead of a path."
+    ),
+    sessions_root: Path | None = typer.Option(
+        None, "--sessions-root", help="Codex sessions root (default: ~/.codex/sessions)."
+    ),
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Machine-readable arl.verdict/v1 JSON on stdout."
+    ),
+    save: bool = typer.Option(
+        True, "--save/--no-save", help="Record the run in the ledger (idempotent)."
+    ),
+) -> None:
+    """Grade a run for a loop: exit 0 = clean, 3 = receipt(s) fired, 1 = error.
+
+    This is the verdict layer for autonomous loops: the graded repair receipt as a
+    machine-consumable exit, so "the run finished" and "the run is verified clean"
+    stop being the same claim. An unreadable run exits 1 — fail closed, never
+    silently clean."""
+    if latest:
+        rollouts = find_recent_rollouts(sessions_root)
+        if not rollouts:
+            root_label = sessions_root or "~/.codex/sessions"
+            console.print(f"error: no Codex session rollouts found under {root_label}")
+            raise typer.Exit(1)
+        path = rollouts[0]
+    if path is None:
+        console.print("error: pass a trace path, or use --latest for the newest Codex session")
+        raise typer.Exit(1)
+
+    bundle = _friendly_or_exit(lambda: _load_any_trace(path))
+    bundle = bundle.with_prescriptions(analyze_bundle(bundle))
+    receipts = build_receipts(bundle)
+
+    if save:
+        # Idempotent by design (Rule 5): a verdict on an already-recorded run is a
+        # read, not a conflict.
+        try:
+            save_bundle(db, bundle)
+        except RunAlreadyRecorded:
+            pass
+
+    if json_out:
+        max_level = (
+            max((r.proof_level for r in receipts), key=PROOF_LEVELS.index) if receipts else None
+        )
+        payload = {
+            "schema": VERDICT_SCHEMA,
+            "run_id": bundle.run.id,
+            "verdict": "receipts" if receipts else "clean",
+            "receipt_count": len(receipts),
+            "max_proof_level": max_level,
+            "receipts": [asdict(r) for r in receipts],
+        }
+        # Plain stdout JSON (typer.echo, not rich): hooks parse this byte-for-byte.
+        typer.echo(json.dumps(payload, indent=2))
+        raise typer.Exit(EXIT_RECEIPTS if receipts else EXIT_CLEAN)
+
+    if not receipts:
+        console.print(
+            f"verdict: clean — no structural failure detected in {bundle.run.id} "
+            "(the honest answer; ARL does not invent receipts)"
+        )
+        raise typer.Exit(EXIT_CLEAN)
+
+    console.print(f"verdict: {len(receipts)} repair receipt(s) fired on {bundle.run.id}")
+    for r in receipts:
+        console.print(
+            f"  [{r.proof_level} | confidence {r.confidence}] {r.observed_failure}: "
+            f"{r.repair_artifact.get('one_line_fix', '')}"
+        )
+    console.print("  review before applying — ARL advises, you apply:")
+    console.print(f"    arl report --run {bundle.run.id}")
+    raise typer.Exit(EXIT_RECEIPTS)
+
+
 def _load_bundle_or_exit(db: Path, run_id: str):
     try:
         return load_bundle(db, run_id)
@@ -179,6 +284,7 @@ def _friendly_or_exit(action: Callable[[], T]) -> T:
         TraceParseError,
         TraceValidationError,
         CodexRolloutError,
+        NoSpansCapturedError,
     ) as exc:
         console.print(f"error: {exc}")
         raise typer.Exit(1) from exc

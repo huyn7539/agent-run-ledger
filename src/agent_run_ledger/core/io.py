@@ -48,12 +48,13 @@ def _check_depth(text: str) -> None:
             depth -= 1
 
 
-def load_trace(path: Path) -> TraceBundle:
-    """Parse an untrusted trace file into a TraceBundle, defensively.
+def load_json_object(path: Path) -> dict[str, Any]:
+    """Defensively read an untrusted JSON file into a top-level object.
 
-    Every field is treated as inert string/scalar data — nothing in a trace is
-    ever evaluated or executed (json.loads only produces data). Size and depth are
-    bounded; malformed or non-object input raises a typed TraceParseError."""
+    The single safe entry point for every single-object import shape (the neutral
+    TraceBundle and any adapter-routed recorded export): size and nesting are
+    bounded, encoding and parse failures raise a typed TraceParseError, and the
+    result is inert data — nothing is ever evaluated."""
     size = path.stat().st_size
     if size > MAX_TRACE_BYTES:
         raise TraceParseError(
@@ -70,6 +71,16 @@ def load_trace(path: Path) -> TraceBundle:
         raise TraceParseError(f"malformed trace JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise TraceParseError("trace top-level must be a JSON object")
+    return data
+
+
+def load_trace(path: Path) -> TraceBundle:
+    """Parse an untrusted trace file into a TraceBundle, defensively.
+
+    Every field is treated as inert string/scalar data — nothing in a trace is
+    ever evaluated or executed (json.loads only produces data). Size and depth are
+    bounded; malformed or non-object input raises a typed TraceParseError."""
+    data = load_json_object(path)
     try:
         return TraceBundle.from_dict(data)
     except TraceValidationError as exc:

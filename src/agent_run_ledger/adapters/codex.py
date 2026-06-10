@@ -505,3 +505,22 @@ def _as_int(value: Any) -> int:
         return int(value) if value is not None else 0
     except (TypeError, ValueError):
         return 0
+
+
+# Where the Codex CLI writes session rollouts (dated subfolders, UUID names).
+DEFAULT_SESSIONS_ROOT = Path.home() / ".codex" / "sessions"
+
+
+def find_recent_rollouts(root: Path | None = None, limit: int = 15) -> list[Path]:
+    """Newest-first rollout files under *root* (default ``~/.codex/sessions``).
+
+    The rollout filename embeds an ISO timestamp (``rollout-2026-06-09T21-30-00-…``),
+    so a reverse name sort IS newest-first across the dated subfolders — no stat
+    calls, no mtime trust (a copied/synced file's mtime lies; its name does not).
+    Defensive: a missing/non-directory root returns ``[]``, never raises — callers
+    (``arl verdict --latest``, hooks) fail closed on empty."""
+    base = root if root is not None else DEFAULT_SESSIONS_ROOT
+    if not base.is_dir():
+        return []
+    files = sorted(base.glob("**/rollout-*.jsonl"), key=lambda p: p.name, reverse=True)
+    return files[:limit]
