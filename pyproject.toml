@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "agent-run-ledger"
 version = "0.2.0"
 description = "Local-first run ledger for AI agent cost, replay, compare, and fix artifacts."
