@@ -342,6 +342,12 @@ def verdict(
 
 SWEEP_SCHEMA = "arl.sweep/v1"
 
+# Codex P2/P3: hard ceiling on how many candidate files a sweep will enumerate
+# before it stops walking a (possibly hostile/huge) directory tree. Bounds the
+# DoS vector; far above any real session archive. Hitting it is reported, never
+# silent.
+_SWEEP_MAX_ENUM = 50_000
+
 # The typed read errors a sweep tolerates PER FILE (the batch continues; the
 # verdict path's fail-closed contract becomes per-file accounting here).
 _SWEEP_READ_ERRORS = (
@@ -383,9 +389,26 @@ def sweep(
     if not root.is_dir():
         console.print(f"error: sweep root is not a directory: {root}")
         raise typer.Exit(1)
-    candidates = sorted(
-        root.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
-    )[: max(limit, 0)]
+    # Codex P2/P3: bound ENUMERATION, not just the result slice. A hostile/huge tree
+    # (millions of *.jsonl) must not be fully globbed+stat'd before slicing — that is
+    # a DoS vector. Walk lazily and stop after _SWEEP_MAX_ENUM candidates; if we hit
+    # that ceiling, SAY SO (no silent truncation — vault rule). Within the bounded
+    # candidate set we still take the newest `limit` by mtime.
+    enumerated: list[Path] = []
+    truncated = False
+    for p in root.glob("**/*.jsonl"):
+        enumerated.append(p)
+        if len(enumerated) >= _SWEEP_MAX_ENUM:
+            truncated = True
+            break
+    if truncated:
+        console.print(
+            f"[yellow]note: sweep stopped enumerating at {_SWEEP_MAX_ENUM} files; "
+            f"grading the newest {max(limit, 0)} of those. Narrow the root to cover more.[/yellow]"
+        )
+    candidates = sorted(enumerated, key=lambda p: p.stat().st_mtime, reverse=True)[
+        : max(limit, 0)
+    ]
     counts = {"clean": 0, "fired": 0, "no_run": 0, "error": 0}
     results: list[dict] = []
     for path in candidates:
