@@ -23,6 +23,7 @@ from agent_run_ledger.core.models import TraceBundle, TraceValidationError
 from agent_run_ledger.core.prescriptions import analyze_bundle
 from agent_run_ledger.core.report import render_comparison, write_report
 from agent_run_ledger.core.storage import (
+    RunAlreadyRecorded,
     cloud_sync_warning,
     init_db,
     list_runs,
@@ -86,7 +87,16 @@ def import_trace(
 ) -> None:
     bundle = _friendly_or_exit(lambda: _load_any_trace(path))
     bundle = bundle.with_prescriptions(analyze_bundle(bundle))
-    run_id = _friendly_or_exit(lambda: save_bundle(db, bundle))
+    # Rule 5: importing the same run twice is safe and quiet. The fact tables are
+    # append-only (L2), so a re-import is a no-op, not a crash — print the existing
+    # run id and the next command instead of a stack trace.
+    try:
+        run_id = save_bundle(db, bundle)
+    except RunAlreadyRecorded:
+        run_id = bundle.run.id
+        console.print(f"already imported: {run_id}")
+        console.print(f"  view it:  arl report --run {run_id}")
+        return
     console.print(f"imported run: {run_id}")
 
 

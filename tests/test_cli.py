@@ -54,6 +54,28 @@ def test_cli_import_external_json(tmp_path: Path) -> None:
     assert "imported run: run_retry_loop" in result.output
 
 
+def test_cli_reimport_is_idempotent_and_friendly(tmp_path: Path) -> None:
+    """Rule 5: importing the same run twice is safe and quiet — no stack trace.
+
+    The fact tables are append-only (L2), so a second import is a no-op. The CLI
+    must report the existing run id + the next command, exit 0, NOT crash with a
+    raw RunAlreadyRecorded traceback (the demo-killing failure mode).
+    """
+    runner = CliRunner()
+    db = tmp_path / "ledger.sqlite"
+
+    first = runner.invoke(app, ["import", "fixtures/golden_retry_loop.json", "--db", str(db)])
+    assert first.exit_code == 0
+    assert "imported run: run_retry_loop" in first.output
+
+    second = runner.invoke(app, ["import", "fixtures/golden_retry_loop.json", "--db", str(db)])
+    assert second.exit_code == 0
+    assert "already imported: run_retry_loop" in second.output
+    assert "arl report --run run_retry_loop" in second.output
+    assert "Traceback" not in second.output
+    assert "RunAlreadyRecorded" not in second.output
+
+
 def test_cli_missing_run_fails_closed(tmp_path: Path) -> None:
     runner = CliRunner()
     db = tmp_path / "ledger.sqlite"
