@@ -1,6 +1,6 @@
-[project]
+﻿[project]
 name = "agent-run-ledger"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first run ledger for AI agent cost, replay, compare, and fix artifacts."
 readme = "README.md"
 requires-python = ">=3.12"

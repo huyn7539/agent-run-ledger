@@ -25,12 +25,19 @@ Install the checkout in editable mode:
 uv pip install -e .
 ```
 
-Grade your newest local agent session:
+See the alarm work first (a bundled known-bad run through the real pipeline),
+then grade your newest local agent session:
 
 ```powershell
+arl selftest                  # proves a receipt fires — so 'clean' means something
 arl verdict --latest          # newest Codex CLI session
 arl verdict --latest-claude   # newest Claude Code session
 ```
+
+ARL's value concentrates on the runs you are NOT watching — unattended loops,
+scheduled jobs, CI lanes, the overnight batch. If you read every diff
+interactively, expect clean verdicts; that is the detector abstaining, and it is
+the honest answer.
 
 Or the classic ledger flow:
 
@@ -75,6 +82,11 @@ inspection of a templated artifact, never by the model's self-report. Every rece
 carries `limits` (what is NOT proven). Receipts are advisory: ARL never applies a
 patch.
 
+Every verdict — including clean — states its **detector coverage** (`coverage` in
+the JSON): what was checked and what was NOT. `clean` means "clean for the checked
+classes," never "verified correct." Run `arl selftest` once to watch a receipt fire
+through the real pipeline; after that, silence is information.
+
 ### Recipes
 
 **A bash loop that stops on a dirty run (Ralph-style):**
@@ -117,6 +129,12 @@ arl verdict --latest --json | Out-File verdict.json   # 0 clean / 3 receipts / 1
   }
 }
 ```
+
+> Mechanics note: Claude Code hooks treat only **exit code 2** as blocking — ARL's
+> exit 3 logs the receipt but will not block the session. If you want a fired
+> receipt to BLOCK, map it in the hook command:
+> `arl verdict --latest-claude --json >> .arl/verdicts.jsonl || exit 2`
+> (any non-zero ARL exit — receipt or unreadable — becomes a blocking 2).
 
 ## What ARL reads today (honest scope)
 

@@ -193,6 +193,24 @@ EXIT_CLEAN = 0
 EXIT_RECEIPTS = 3
 VERDICT_SCHEMA = "arl.verdict/v1"
 
+# Coverage honesty (2026-06-10 gauntlet, convergent fix #1): a 'clean' that does
+# not name its checked classes gets read as "agent output verified" — which this
+# tool does NOT claim. Every verdict states what was and was not checked.
+DETECTOR_COVERAGE = {
+    "detector_version": "v1",
+    "checked": [
+        "retry_loop: autonomous same-tool same-input repeated failures "
+        "(incl. cross-turn), graded L0-L2",
+    ],
+    "not_checked": [
+        "specification failure (agent built the wrong thing)",
+        "artifact failure / wrong-but-passing patch (incl. success claims "
+        "contradicted by the session log)",
+        "context loss / continuity",
+        "cost & quota attribution",
+    ],
+}
+
 
 @app.command("verdict")
 def verdict(
@@ -273,6 +291,7 @@ def verdict(
             "verdict": "receipts" if receipts else "clean",
             "receipt_count": len(receipts),
             "max_proof_level": max_level,
+            "coverage": DETECTOR_COVERAGE,
             "receipts": [asdict(r) for r in receipts],
         }
         # Plain stdout JSON (typer.echo, not rich): hooks parse this byte-for-byte.
@@ -281,8 +300,15 @@ def verdict(
 
     if not receipts:
         console.print(
-            f"verdict: clean — no structural failure detected in {bundle.run.id} "
-            "(the honest answer; ARL does not invent receipts)"
+            f"verdict: clean for the checked classes — no structural failure detected "
+            f"in {bundle.run.id}"
+        )
+        console.print(
+            "  checked: retry loops (detector v1) · NOT checked: spec failures, "
+            "artifact/wrong-but-green patches, context loss"
+        )
+        console.print(
+            "  clean ≠ verified-correct. Run `arl selftest` to see a receipt fire."
         )
         raise typer.Exit(EXIT_CLEAN)
 
@@ -297,6 +323,38 @@ def verdict(
     raise typer.Exit(EXIT_RECEIPTS)
 
 
+@app.command("selftest")
+def selftest() -> None:
+    """Prove the alarm fires: a bundled known-bad run through the real pipeline.
+
+    If this passes, a 'clean' verdict on your runs means the detector abstained —
+    not that the plumbing is broken. Exit 0 = pass, 1 = this install is broken."""
+    from agent_run_ledger.core.selftest import selftest_receipts
+
+    try:
+        receipts = selftest_receipts()
+    except Exception as exc:  # a selftest must never traceback — report and fail
+        console.print(f"selftest: FAIL — pipeline error: {exc}")
+        raise typer.Exit(1) from exc
+    if not receipts or any(r.proof_level not in PROOF_LEVELS for r in receipts):
+        console.print(
+            "selftest: FAIL — the bundled known-bad run did not produce a graded "
+            "receipt; this install's detector pipeline is broken"
+        )
+        raise typer.Exit(1)
+    r = receipts[0]
+    console.print("selftest: running a bundled known-bad run through the real pipeline")
+    console.print(
+        f"  receipt fired: {r.observed_failure} at {r.proof_level} (confidence {r.confidence})"
+    )
+    console.print(f"  fix direction: {r.repair_artifact.get('one_line_fix', '')}")
+    console.print(
+        "selftest: PASS — the alarm fires; 'clean' on your runs means the detector "
+        "abstained, not that it is deaf"
+    )
+    raise typer.Exit(0)
+
+
 def _load_bundle_or_exit(db: Path, run_id: str):
     try:
         return load_bundle(db, run_id)
@@ -309,7 +367,10 @@ def _friendly_or_exit(action: Callable[[], T]) -> T:
     try:
         return action()
     except (
-        FileNotFoundError,
+        # OSError covers FileNotFound, PermissionError, IsADirectoryError, and
+        # every other OS-level read failure — a directory or unreadable path must
+        # produce a typed exit-1 error, never a traceback (Codex finding, 2026-06-10).
+        OSError,
         json.JSONDecodeError,
         TraceParseError,
         TraceValidationError,

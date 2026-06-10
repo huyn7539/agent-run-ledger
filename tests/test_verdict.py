@@ -65,6 +65,53 @@ def test_verdict_missing_path_and_no_latest_is_an_error(tmp_path: Path) -> None:
     assert "error" in result.output.lower()
 
 
+def test_verdict_directory_input_fails_closed_no_traceback(tmp_path: Path) -> None:
+    """Codex advisor finding (2026-06-10): a directory produced a raw traceback.
+    Fail-closed means TYPED error + exit 1 on every unreadable input shape."""
+    some_dir = tmp_path / "a_directory"
+    some_dir.mkdir()
+    result = _invoke(["verdict", str(some_dir), "--db", str(tmp_path / "l.sqlite")])
+    assert result.exit_code == 1, result.output
+    assert "error" in result.output.lower()
+    assert "Traceback" not in result.output
+
+
+# ------------------------------------------------------- coverage honesty
+
+
+def test_verdict_json_states_detector_coverage(tmp_path: Path) -> None:
+    """Gauntlet convergent fix #1: 'clean' must say what was checked, or exit 0
+    launders unverified work as verified (anti-AI persona: 'a green checkmark
+    from a single-detector tool is active laundering of slop')."""
+    db = tmp_path / "ledger.sqlite"
+    result = _invoke(["verdict", "fixtures/clean_run.json", "--db", str(db), "--json"])
+    payload = json.loads(result.output)
+    assert "coverage" in payload
+    assert any("retry" in c for c in payload["coverage"]["checked"])
+    assert payload["coverage"]["not_checked"], "unchecked classes must be named"
+
+
+def test_verdict_clean_human_output_names_unchecked_classes(tmp_path: Path) -> None:
+    db = tmp_path / "ledger.sqlite"
+    result = _invoke(["verdict", "fixtures/clean_run.json", "--db", str(db)])
+    assert result.exit_code == 0
+    out = result.output.lower()
+    assert "checked" in out and "not checked" in out
+
+
+# ------------------------------------------------------------- selftest
+
+
+def test_selftest_fires_a_graded_receipt() -> None:
+    """Gauntlet convergent fix #2 (burned-skeptic): users must be able to SEE the
+    alarm fire in minute one, or 'clean' is indistinguishable from 'deaf'."""
+    result = _invoke(["selftest"])
+    assert result.exit_code == 0, result.output
+    assert "PASS" in result.output
+    assert "receipt fired" in result.output
+    assert any(level in result.output for level in PROOF_LEVELS)
+
+
 # ---------------------------------------------------------------- json schema
 
 
