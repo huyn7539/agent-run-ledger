@@ -10,6 +10,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from agent_run_ledger.adapters.claude_code import (
+    ClaudeCodeSessionError,
+    bundle_from_session,
+    find_recent_sessions,
+    load_claude_session,
+    looks_like_claude_session_file,
+)
 from agent_run_ledger.adapters.codex import (
     CodexRolloutError,
     bundle_from_rollout,
@@ -72,18 +79,21 @@ def run_demo(
 def _load_any_trace(path: Path) -> TraceBundle:
     """Route an import by FORMAT (provider-neutral detection):
 
-    * a line-delimited JSON log (``.jsonl`` / multiple JSON objects) -> the Codex
-      rollout adapter, which maps the provider log into the neutral TraceBundle;
+    * a line-delimited JSON log whose lines carry the Claude Code session shape
+      (top-level ``sessionId`` + ``uuid``) -> the Claude Code adapter;
+    * any other line-delimited JSON log -> the Codex rollout adapter;
     * a single JSON object carrying ``trace`` + ``spans`` (and no ``run``) -> a
       recorded OpenAI-SDK trace export -> the OpenAI adapter's
       ``bundle_from_recorded_trace`` (pure parsing; no SDK dependency);
     * any other single JSON object -> the neutral TraceBundle path.
 
-    The detection names no provider field — only the file SHAPE — so the core
-    stays provider-neutral; provider-specific parsing lives entirely in the
-    adapters. All single-object reads share ``load_json_object``'s defensive
-    size/depth/encoding bounds."""
+    The detection names no provider field beyond the adapters' own probes — only
+    file SHAPE — so the core stays provider-neutral; provider-specific parsing
+    lives entirely in the adapters. All single-object reads share
+    ``load_json_object``'s defensive size/depth/encoding bounds."""
     if looks_like_jsonl(path):
+        if looks_like_claude_session_file(path):
+            return bundle_from_session(load_claude_session(path))
         return bundle_from_rollout(load_codex_rollout(path))
     data = load_json_object(path)
     if "run" not in data and "trace" in data and "spans" in data:
@@ -193,8 +203,16 @@ def verdict(
     latest: bool = typer.Option(
         False, "--latest", help="Grade the newest local Codex session rollout instead of a path."
     ),
+    latest_claude: bool = typer.Option(
+        False, "--latest-claude", help="Grade the newest local Claude Code session instead of a path."
+    ),
     sessions_root: Path | None = typer.Option(
         None, "--sessions-root", help="Codex sessions root (default: ~/.codex/sessions)."
+    ),
+    claude_projects_root: Path | None = typer.Option(
+        None,
+        "--claude-projects-root",
+        help="Claude Code projects root (default: ~/.claude/projects).",
     ),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
     json_out: bool = typer.Option(
@@ -210,6 +228,9 @@ def verdict(
     machine-consumable exit, so "the run finished" and "the run is verified clean"
     stop being the same claim. An unreadable run exits 1 — fail closed, never
     silently clean."""
+    if latest and latest_claude:
+        console.print("error: pass --latest OR --latest-claude, not both")
+        raise typer.Exit(1)
     if latest:
         rollouts = find_recent_rollouts(sessions_root)
         if not rollouts:
@@ -217,8 +238,17 @@ def verdict(
             console.print(f"error: no Codex session rollouts found under {root_label}")
             raise typer.Exit(1)
         path = rollouts[0]
+    if latest_claude:
+        sessions = find_recent_sessions(claude_projects_root)
+        if not sessions:
+            root_label = claude_projects_root or "~/.claude/projects"
+            console.print(f"error: no Claude Code sessions found under {root_label}")
+            raise typer.Exit(1)
+        path = sessions[0]
     if path is None:
-        console.print("error: pass a trace path, or use --latest for the newest Codex session")
+        console.print(
+            "error: pass a trace path, or use --latest (Codex) / --latest-claude (Claude Code)"
+        )
         raise typer.Exit(1)
 
     bundle = _friendly_or_exit(lambda: _load_any_trace(path))
@@ -284,6 +314,7 @@ def _friendly_or_exit(action: Callable[[], T]) -> T:
         TraceParseError,
         TraceValidationError,
         CodexRolloutError,
+        ClaudeCodeSessionError,
         NoSpansCapturedError,
     ) as exc:
         console.print(f"error: {exc}")

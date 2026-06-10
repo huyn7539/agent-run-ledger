@@ -1,14 +1,21 @@
 # Agent Run Ledger
 
-Agent Run Ledger is a local-first CLI for AI agent workflows.
+Agent Run Ledger (ARL) is a local-first CLI that turns AI coding-agent runs into
+**graded repair receipts** — and, in verdict mode, into a machine-consumable exit
+code your loop can gate on.
 
 Wedge:
 
-> Every agent run gets a ledger record. Every DETECTED failure gets a graded repair receipt — and, when the evidence supports it, a concrete fix artifact.
+> Every agent run gets a ledger record. Every DETECTED failure gets a graded repair
+> receipt — and, when the evidence supports it, a concrete fix artifact.
 
-(A clean run with no detected failure emits no prescription and no receipt — by design: ARL does not invent receipts where there is nothing to repair.)
+(A clean run with no detected failure emits no prescription and no receipt — by
+design: ARL does not invent receipts where there is nothing to repair. "The run
+finished" and "the run is verified clean" are different claims; ARL exists to keep
+them different.)
 
-V0 records agent runs, stores them in SQLite, renders static HTML reports, compares runs, and emits a retry/cost-loop prescription with a concrete patch artifact.
+Everything runs on your machine. Prompt/output content never leaves it. There is no
+server, no telemetry, no network code in the package (enforced by tests).
 
 ## Quick Start
 
@@ -18,55 +25,131 @@ Install the checkout in editable mode:
 uv pip install -e .
 ```
 
-Then run:
+Grade your newest local agent session:
 
 ```powershell
-uv run arl init
-uv run arl run-demo --variant retry-loop
-uv run arl list-runs
-uv run arl report --run <RUN_ID>
-uv run arl run-demo --variant clean
-uv run arl compare --left <RUN_ID_A> --right <RUN_ID_B>
+arl verdict --latest          # newest Codex CLI session
+arl verdict --latest-claude   # newest Claude Code session
 ```
 
-Without installing the console script, use `uv run` from the repo:
+Or the classic ledger flow:
 
 ```powershell
-uv run python -m agent_run_ledger.cli init
-uv run python -m agent_run_ledger.cli run-demo --variant retry-loop
+arl init
+arl run-demo --variant retry-loop
+arl list-runs
+arl report --run <RUN_ID>
+arl compare --left <RUN_ID_A> --right <RUN_ID_B>
 ```
+
+## Verdict mode — the loop contract
+
+Autonomous loops today exit on tests-pass, string matching, or the agent's own
+say-so. `arl verdict` gives a loop an independent, graded exit:
+
+| Exit | Meaning |
+|---|---|
+| `0` | clean — no structural failure detected (the honest negative) |
+| `3` | one or more repair receipts fired — attention |
+| `1` | error — unreadable/invalid input **fails closed**: an unparseable run is never silently clean |
+
+`--json` prints a stable machine schema (`arl.verdict/v1`) on stdout:
+
+```json
+{
+  "schema": "arl.verdict/v1",
+  "run_id": "codex_0123…",
+  "verdict": "receipts",
+  "receipt_count": 1,
+  "max_proof_level": "L2",
+  "receipts": [ { "claim": "…", "observed_failure": "retry_loop",
+                  "proof_level": "L2", "confidence": "medium",
+                  "repair_artifact": { "…": "…" }, "limits": ["…"],
+                  "next_evidence": ["…"] } ]
+}
+```
+
+Proof levels are the L0–L6 ladder. L2 means the fix *mechanically removes the
+deterministic failure path, verifiable without a re-run* — graded by static
+inspection of a templated artifact, never by the model's self-report. Every receipt
+carries `limits` (what is NOT proven). Receipts are advisory: ARL never applies a
+patch.
+
+### Recipes
+
+**A bash loop that stops on a dirty run (Ralph-style):**
+
+```bash
+while :; do
+  run-my-agent
+  arl verdict --latest || break   # exit 3 (receipt) or 1 (unreadable) stops the loop
+done
+```
+
+**A CI step (receipt as job evidence):**
+
+```yaml
+- name: ARL verdict on the agent session
+  run: |
+    arl verdict path/to/session.jsonl --json > arl-verdict.json
+    # exit 3 fails the step when a receipt fires; artifact carries the receipt
+  continue-on-error: true
+- uses: actions/upload-artifact@v4
+  with: { name: arl-verdict, path: arl-verdict.json }
+```
+
+**A scheduled check of your latest unattended session:**
+
+```powershell
+arl verdict --latest --json | Out-File verdict.json   # 0 clean / 3 receipts / 1 error
+```
+
+**A Claude Code Stop hook (receipt on every finished session, zero remembered steps):**
+
+```jsonc
+// .claude/settings.json
+{
+  "hooks": {
+    "Stop": [
+      { "hooks": [ { "type": "command",
+          "command": "arl verdict --latest-claude --json >> .arl/verdicts.jsonl" } ] }
+    ]
+  }
+}
+```
+
+## What ARL reads today (honest scope)
+
+- **Codex CLI** session rollouts (`~/.codex/sessions/**/rollout-*.jsonl`) — live, today.
+- **Claude Code** session logs (`~/.claude/projects/**/*.jsonl`, including subagent
+  sessions) — live, today. A chat-only session with no tool calls errors honestly
+  ("no run to record") rather than grading something it cannot see.
+- **OpenAI Agents SDK** recorded trace exports (JSON) — live, today.
+- **Neutral TraceBundle JSON** (ARL's own schema) — live, today.
+
+All input is treated as hostile: size/depth-bounded parsing, typed errors, nothing
+evaluated. Trace content never leaves the machine.
 
 ## V0 Scope
 
-Included:
+Included: provider-neutral trace schema · local SQLite storage · JSON import/export ·
+static HTML report · run comparison · retry/cost-loop prescription with patch
+artifact · graded RepairReceipts (L0–L2 implemented honestly) · verdict mode with
+the loop exit contract · OpenAI + Codex adapters isolated outside the core package ·
+read-only Claude/Codex review bus under `.agentbus/`.
 
-- Provider-neutral trace schema.
-- Local SQLite storage.
-- JSON import/export.
-- Static HTML report.
-- Run comparison.
-- Retry/cost-loop prescription with patch artifact.
-- OpenAI adapter isolated outside the core package.
-- Read-only Claude/Codex review bus under `.agentbus/`.
+Not included: hosted SaaS · auth/billing · public dashboard · memory graph ·
+autonomous patch application · telemetry of any kind.
 
-Not included:
+## Status
 
-- Hosted SaaS.
-- Auth or billing.
-- Public dashboard.
-- Memory graph.
-- Autonomous patch application.
-- Multi-provider adapters.
-
-## Current Gates
-
-Still open before builder demos:
-
-- 5 customer-discovery interviews, with at least 3 validating the patch-artifact pain.
-- Operator approval of `docs/prescription-taxonomy.md`.
-- One live OpenAI Agents SDK run with an API key. The recorded fixture proves adapter
-  normalization only; it is not a live-run proof.
+The detector and receipts run on real Codex sessions today; most well-run
+interactive sessions grade **clean**, which is the honest expected result — the
+target population is unattended/scheduled/CI runs, where waste hides. The current
+validation bar (2026-06-10): graded receipts produced on real users' real failures,
+measured by whether they **apply** the fix — not stars, not installs.
 
 ## Private Alpha Definition
 
-An activated install means a builder produces at least one trace report on their own machine. Package downloads, stars, and README views do not count.
+An activated install means a builder produces at least one verdict or trace report
+on their own machine. Package downloads, stars, and README views do not count.
