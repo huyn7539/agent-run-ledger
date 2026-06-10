@@ -576,6 +576,15 @@ class TraceBundle:
     # Caller-supplied (not a buried wall-clock) so capture stays deterministic
     # for golden + idempotency tests; "" means "not stamped".
     ingested_at: str = ""
+    # IN-PROCESS-ONLY trust bit (Codex P1-1 spoof hardening, 2026-06-11): True
+    # only when a capture adapter built this bundle and computed its facts from
+    # real session content in this process. NEVER read by from_dict and NEVER
+    # written by to_dict — an imported file cannot claim it about itself, and an
+    # export/import round trip cannot smuggle it. Persistence to the ledger goes
+    # through storage.save_bundle (the DB is ARL's own write, inside the trust
+    # boundary); everything loaded from a FILE stays False, whatever its
+    # framework string says.
+    adapter_provenanced: bool = False
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TraceBundle:

@@ -45,17 +45,20 @@ from agent_run_ledger.core.prescriptions import derive_retry_steps
 # Closed proof ladder (the SHAPE is locked; this slice grades only L0–L2).
 PROOF_LEVELS: tuple[str, ...] = ("L0", "L1", "L2", "L3", "L4", "L5", "L6")
 
-# Codex P1 (2026-06-11): artifact_failure FACTS (deletes_test_path,
-# completion_claim_follows, user_directed_deletion) are only trustworthy when an
-# ADAPTER computed them in-process from real session content. A neutral JSON
-# import lets a hostile author hand-supply those booleans, so a forged file could
-# claim an artifact_failure at L1 against a stranger it's accusing. Artifact
-# grading is therefore gated on the run having come through a known capture
-# adapter (framework set by the adapter, not by the imported file). The neutral
-# schema default is "unknown-framework"; the recorded-trace import path does not
-# compute these facts. This mirrors the retry path's "grade from derived facts,
-# never the evidence string" discipline (Task 51), applied to the import boundary.
-_ADAPTER_PROVENANCED_FRAMEWORKS: frozenset[str] = frozenset({"claude-code", "codex-cli"})
+# Codex P1 (2026-06-11, spoof-hardened same day): artifact_failure FACTS
+# (deletes_test_path, completion_claim_follows, user_directed_deletion) are only
+# trustworthy when an ADAPTER computed them in-process from real session
+# content. A neutral JSON import lets a hostile author hand-supply those
+# booleans, so a forged file could claim an artifact_failure at L1 against a
+# stranger it's accusing. Artifact grading is therefore gated on
+# ``TraceBundle.adapter_provenanced`` — an in-process bit set ONLY by the
+# claude-code / codex-cli capture adapters and never read from an imported
+# file. The first version of this gate keyed off ``run.framework``, which the
+# imported file controls: a forger who declared ``"framework": "claude-code"``
+# walked straight through it. The framework string is metadata; the trust bit
+# is process provenance. This mirrors the retry path's "grade from derived
+# facts, never the evidence string" discipline (Task 51), applied to the import
+# boundary.
 
 # A receipt's failure label is a bounded vocabulary (proof-ladder doc).
 OBSERVED_FAILURES: tuple[str, ...] = (
@@ -197,8 +200,7 @@ def _artifact_failure_receipt(
     bundle: TraceBundle, rx: PrescriptionRecord, raw_by_id: dict[str, StepRecord]
 ) -> RepairReceipt:
     rule = _artifact_rule(rx.evidence)
-    adapter_provenanced = bundle.run.framework in _ADAPTER_PROVENANCED_FRAMEWORKS
-    proof_level = _grade_artifact_failure(rx, raw_by_id, adapter_provenanced)
+    proof_level = _grade_artifact_failure(rx, raw_by_id, bundle.adapter_provenanced)
     return RepairReceipt(
         run_id=bundle.run.id,
         claim=_artifact_claim(rule, proof_level),

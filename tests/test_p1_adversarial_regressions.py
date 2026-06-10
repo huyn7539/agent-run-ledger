@@ -11,11 +11,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from agent_run_ledger.adapters._facts import instruction_directs_deletion
 from agent_run_ledger.cli import app
 from agent_run_ledger.core.models import sanitize_metadata
+
+# A patch that PASSES bundle validation (>= 64 chars, config_diff shape). The
+# original tests used "" — an invalid artifact — so `verdict` rejected the whole
+# bundle and the `if payload` guard skipped every assertion: the regression
+# locks were vacuous (2026-06-11 audit finding). A real forger sends a
+# well-formed file; the fixtures must too.
+_VALID_CONFIG_DIFF = (
+    "- guard: off\n+ guard: on\n"
+    "- delete_tests_allowed: true\n+ delete_tests_allowed: false\n"
+)
 
 
 def _verdict_json(path: Path, tmp_path: Path):
@@ -32,11 +43,10 @@ def _write(tmp_path: Path, name: str, obj: dict) -> Path:
     return f
 
 
-# P1-1: forged neutral artifact booleans must NOT earn an L1 accusation.
-def test_forged_neutral_artifact_booleans_never_l1(tmp_path: Path) -> None:
-    forged = {
+def _forged_artifact_bundle(framework: str) -> dict:
+    return {
         "run": {
-            "id": "forged_neutral", "workflow": "x", "framework": "unknown-framework",
+            "id": f"forged_{framework}", "workflow": "x", "framework": framework,
             "provider": "x", "model": "m", "started_at": "2026-01-01T00:00:00Z",
             "ended_at": "2026-01-01T00:00:01Z", "success_label": "unknown",
         },
@@ -51,12 +61,66 @@ def test_forged_neutral_artifact_booleans_never_l1(tmp_path: Path) -> None:
         "prescriptions": [{
             "rule_id": "artifact", "failure_class": "artifact_failure",
             "evidence": ["rule=R1", "step_id=s1"], "one_line_fix": "x",
-            "patch_type": "config_diff", "patch": "", "expected_impact": {},
+            "patch_type": "config_diff", "patch": _VALID_CONFIG_DIFF,
+            "expected_impact": {},
         }],
     }
+
+
+# P1-1: forged neutral artifact booleans must NOT earn an L1 accusation.
+def test_forged_neutral_artifact_booleans_never_l1(tmp_path: Path) -> None:
+    forged = _forged_artifact_bundle("unknown-framework")
     _, payload = _verdict_json(_write(tmp_path, "forged.json", forged), tmp_path)
-    if payload and payload.get("receipts"):
-        assert all(r["proof_level"] == "L0" for r in payload["receipts"]), payload["receipts"]
+    assert payload is not None, "verdict must grade the forged bundle, not reject it"
+    assert payload.get("receipts"), "the forge must surface a (diagnostic) receipt"
+    assert all(r["proof_level"] == "L0" for r in payload["receipts"]), payload["receipts"]
+
+
+# P1-1 (spoof variant, 2026-06-11 audit): declaring an adapter's framework string
+# in the forged file must NOT unlock L1. Provenance is an in-process fact set by
+# the capture adapter, never a string the imported file gets to claim about
+# itself. This is the attack the first regression lock missed: it only tested a
+# polite forger who left framework at "unknown-framework".
+@pytest.mark.parametrize("framework", ["claude-code", "codex-cli"])
+def test_spoofed_adapter_framework_never_l1(tmp_path: Path, framework: str) -> None:
+    forged = _forged_artifact_bundle(framework)
+    _, payload = _verdict_json(_write(tmp_path, "spoofed.json", forged), tmp_path)
+    assert payload is not None, "verdict must grade the spoofed bundle, not reject it"
+    assert payload.get("receipts"), "the forge must surface a (diagnostic) receipt"
+    assert all(r["proof_level"] == "L0" for r in payload["receipts"]), payload["receipts"]
+
+
+# P1-1 (storage variant): the cap must survive a ledger round trip. A forged
+# file imported via `arl import` and re-graded from the DB (`arl report`) gets
+# adapter_provenanced=0 in the runs row no matter what framework string it
+# declared; only a bundle built in-process by a capture adapter persists as 1.
+def test_spoofed_framework_capped_after_db_round_trip(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from agent_run_ledger.core.models import TraceBundle
+    from agent_run_ledger.core.receipt import build_receipts
+    from agent_run_ledger.core.storage import load_bundle, save_bundle
+
+    db = tmp_path / "l.sqlite"
+    forged = TraceBundle.from_dict(_forged_artifact_bundle("claude-code"))
+    assert forged.adapter_provenanced is False
+    loaded = load_bundle(db, save_bundle(db, forged))
+    assert loaded.adapter_provenanced is False
+    receipts = build_receipts(loaded)
+    assert receipts, "the forge must surface a (diagnostic) receipt"
+    assert all(r.proof_level == "L0" for r in receipts), receipts
+
+    # The legitimate side: in-process adapter provenance survives the same trip.
+    # (prescriptions dropped: their ids are globally unique in the DB and the
+    # assertion here is only about the trust bit's persistence.)
+    legit = replace(
+        forged,
+        run=replace(forged.run, id="legit"),
+        steps=[replace(s, run_id="legit") for s in forged.steps],
+        prescriptions=[],
+        adapter_provenanced=True,
+    )
+    assert load_bundle(db, save_bundle(db, legit)).adapter_provenanced is True
 
 
 # P1-2: forged config_diff with no corroborated observed count grades L0, not L1.
@@ -74,13 +138,13 @@ def test_forged_config_diff_without_observed_count_is_l0(tmp_path: Path) -> None
         "prescriptions": [{
             "rule_id": "retry", "failure_class": "retry_loop",
             "evidence": ["step_id=missing_step", "retry_count=99 additional attempts"],
-            "one_line_fix": "x", "patch_type": "config_diff", "patch": "",
-            "expected_impact": {},
+            "one_line_fix": "x", "patch_type": "config_diff",
+            "patch": _VALID_CONFIG_DIFF, "expected_impact": {},
         }],
     }
     _, payload = _verdict_json(_write(tmp_path, "forged2.json", forged), tmp_path)
-    if payload and payload.get("receipts"):
-        assert all(r["proof_level"] == "L0" for r in payload["receipts"]), payload["receipts"]
+    assert payload is not None, "verdict must grade the forged bundle, not reject it"
+    assert all(r["proof_level"] == "L0" for r in payload.get("receipts") or []), payload
 
 
 # P1-4: a smuggled string under a content-free fact key coerces to bool, never leaks.

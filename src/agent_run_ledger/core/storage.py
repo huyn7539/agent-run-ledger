@@ -65,7 +65,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
 # "which additive DDL migrations has this file had" (distinct from the per-row
 # schema_version, which records the shape an individual record was written
 # under). Bump this and append an `_ensure_column` for any additive change.
-USER_VERSION = 1
+# v2: runs.adapter_provenanced (P1-1 spoof hardening, 2026-06-11).
+USER_VERSION = 2
 
 
 class RunAlreadyRecorded(Exception):
@@ -110,7 +111,8 @@ def init_db(db_path: Path) -> None:
                         ('pay_per_use','subscription','enterprise_contract','local','unknown')),
                 price_table_version TEXT,
                 provenance_hash TEXT,
-                outcome_json TEXT
+                outcome_json TEXT,
+                adapter_provenanced INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS steps (
@@ -191,6 +193,11 @@ def init_db(db_path: Path) -> None:
         _ensure_column(
             conn, "prescriptions", "failure_class", "TEXT NOT NULL DEFAULT 'retry_loop'"
         )
+        # v2 (P1-1 spoof hardening): the in-process adapter trust bit, persisted
+        # because the DB is ARL's own write. DEFAULT 0 = pre-v2 rows fail CLOSED:
+        # an old row re-graded by report caps artifact receipts at L0 until
+        # re-captured through an adapter, never the other way around.
+        _ensure_column(conn, "runs", "adapter_provenanced", "INTEGER NOT NULL DEFAULT 0")
         # Stamp the file's DDL version. Stays put once at USER_VERSION (no DDL on
         # the hot path → user_version does not increment on repeat init).
         current = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -221,8 +228,9 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
                 id, schema_version, workflow, framework, provider, model, started_at,
                 ended_at, success_label, prompt_hash, config_hash, total_cost_usd,
                 total_latency_ms, total_input_tokens, total_output_tokens, ingested_at,
-                billing_mode, price_table_version, provenance_hash, outcome_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                billing_mode, price_table_version, provenance_hash, outcome_json,
+                adapter_provenanced
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 bundle.run.id,
@@ -245,6 +253,7 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
                 bundle.run.price_table_version,
                 bundle.run.provenance_hash,
                 bundle.run.outcome_json,
+                1 if bundle.adapter_provenanced else 0,
             ),
         )
         for step in bundle.steps:
@@ -334,6 +343,9 @@ def load_bundle(db_path: Path, run_id: str) -> TraceBundle:
         prescriptions=prescriptions,
         schema_version=run.schema_version,
         ingested_at=_row_get(run_row, "ingested_at", ""),
+        # Trusted on read-back: the row was written by save_bundle from the
+        # in-process bit (file imports store 0). Pre-v2 rows default 0 (closed).
+        adapter_provenanced=bool(_row_get(run_row, "adapter_provenanced", 0)),
     )
     bundle.validate()
     return bundle

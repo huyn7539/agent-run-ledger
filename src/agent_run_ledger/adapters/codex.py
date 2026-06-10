@@ -232,7 +232,10 @@ def bundle_from_rollout(records: list[dict[str, Any]]) -> TraceBundle:
         total_input_tokens=total_input,
         total_output_tokens=total_output,
     )
-    bundle = TraceBundle(run=run, steps=steps)
+    # adapter_provenanced: this adapter computed the artifact facts in-process
+    # from the raw rollout — the bit that unlocks L1 artifact grading. Imported
+    # files can never set it (models.TraceBundle field comment).
+    bundle = TraceBundle(run=run, steps=steps, adapter_provenanced=True)
     # L5: stamp the provenance hash locally over the RAW steps (no derived
     # collapse) — the un-backfillable seed of proof-of-real.
     return replace(bundle, run=replace(run, provenance_hash=compute_provenance_hash(bundle)))
