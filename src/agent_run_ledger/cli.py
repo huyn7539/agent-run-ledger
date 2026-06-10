@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Callable, TypeVar
@@ -56,7 +57,30 @@ app = typer.Typer(
     ),
     no_args_is_help=True,
 )
-console = Console()
+def _safe_console() -> Console:
+    """A Console that can NEVER crash human output on a legacy console encoding.
+
+    P0 (full-suite audit 2026-06-11): on a default Windows console (cp1252/cp437,
+    PYTHONUTF8 unset — cmd.exe, most PowerShell, windows-latest CI) a single
+    non-encodable glyph in a status line raised UnicodeEncodeError, dumped a
+    traceback, and exited 1 — and it fired on the CLEAN verdict path, the product's
+    most-common outcome, mis-reported to a gating loop as 'unreadable'. The test
+    suite never saw it because CliRunner captures through a UTF-8 buffer. Fix at the
+    source: reconfigure stdout to UTF-8 with errors='replace' where supported so no
+    human glyph can crash AND mojibake (the `?`/box-char garbling) stops too. If the
+    stream can't be reconfigured (already wrapped, e.g. under CliRunner), fall back
+    to a default Console — that path is UTF-8 anyway."""
+    stream = sys.stdout
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+    return Console()
+
+
+console = _safe_console()
 T = TypeVar("T")
 
 
@@ -355,7 +379,7 @@ def verdict(
             "context loss"
         )
         console.print(
-            "  clean ≠ verified-correct. Run `arl selftest` to see a receipt fire."
+            "  clean is NOT verified-correct. Run `arl selftest` to see a receipt fire."
         )
         raise typer.Exit(EXIT_CLEAN)
 
