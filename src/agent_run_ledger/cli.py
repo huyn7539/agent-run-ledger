@@ -42,7 +42,20 @@ from agent_run_ledger.core.storage import (
     save_bundle,
 )
 
-app = typer.Typer(help="Agent Run Ledger CLI")
+app = typer.Typer(
+    help=(
+        "Agent Run Ledger — a local-first, honest, graded verdict layer for AI "
+        "coding-agent runs. Everything stays on your machine.\n\n"
+        "New here? Start with these three:\n"
+        "  arl selftest                 see a real receipt fire (proves the alarm works)\n"
+        "  arl verdict --latest-claude  grade your newest Claude Code session\n"
+        "  arl sweep ~/.claude/projects scan your whole session history\n\n"
+        "verdict exit codes: 0 = clean (for the checked classes) · 3 = a repair "
+        "receipt fired · 1 = unreadable (fails closed). 'clean' never means "
+        "'verified correct'."
+    ),
+    no_args_is_help=True,
+)
 console = Console()
 T = TypeVar("T")
 
@@ -60,6 +73,7 @@ def _warn_cloud_sync(db: Path) -> None:
 
 @app.command("init")
 def init(db: Path = typer.Option(default_factory=default_db, help="SQLite database path.")) -> None:
+    """Create the local ledger database (optional — verdict/sweep create it on demand)."""
     _warn_cloud_sync(db)
     init_db(db)
     console.print(f"initialized ledger: {db}")
@@ -70,6 +84,7 @@ def run_demo(
     variant: str = typer.Option("retry-loop", help="Demo variant: retry-loop or clean."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
+    """Store a built-in demo run (retry-loop or clean) to explore report/compare."""
     bundle = load_demo_bundle(variant)
     bundle = bundle.with_prescriptions(analyze_bundle(bundle))
     run_id = save_bundle(db, bundle)
@@ -109,6 +124,8 @@ def import_trace(
     path: Path = typer.Argument(..., help="Trace file: a single-object trace JSON, or a Codex .jsonl rollout log."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
+    """Record a run in the local ledger (for report/compare/export). For a quick
+    pass/fail use `arl verdict` instead."""
     bundle = _friendly_or_exit(lambda: _load_any_trace(path))
     bundle = bundle.with_prescriptions(analyze_bundle(bundle))
     # Rule 5: importing the same run twice is safe and quiet. The fact tables are
@@ -130,6 +147,7 @@ def export_trace(
     out: Path = typer.Option(..., "--out", help="Output JSON path."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
+    """Export a recorded run back to a neutral trace JSON file (local; raw facts)."""
     bundle = _load_bundle_or_exit(db, run)
     _friendly_or_exit(lambda: write_trace(bundle, out))
     console.print(f"wrote trace: {out}")
@@ -141,6 +159,7 @@ def report(
     out: Path | None = typer.Option(None, "--out", help="Output HTML path."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
+    """Write a static local HTML report for a recorded run."""
     bundle = _load_bundle_or_exit(db, run)
     output = out or Path(".arl") / "reports" / f"{run}.html"
     _friendly_or_exit(lambda: write_report(bundle, output))
@@ -153,6 +172,7 @@ def compare(
     right: str = typer.Option(..., "--right", help="Right/candidate run id."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
+    """Compare two recorded runs (cost/tokens/outcome deltas)."""
     comparison = compare_bundles(_load_bundle_or_exit(db, left), _load_bundle_or_exit(db, right))
     console.print(render_comparison(comparison))
 
@@ -161,6 +181,7 @@ def compare(
 def list_runs_cmd(
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
+    """List the runs recorded in the local ledger."""
     rows = list_runs(db)
     table = Table(title="Agent Run Ledger")
     table.add_column("Run")
@@ -284,6 +305,15 @@ def verdict(
         )
         raise typer.Exit(1)
 
+    # First-user polish: a directory path is a common mistake; catch it before the
+    # OS open (Windows raises PermissionError, POSIX IsADirectoryError — neither
+    # reads cleanly). Point them at `sweep`, which is what they almost certainly want.
+    if path.is_dir():
+        console.print(
+            f"error: {path} is a directory, not a session file — "
+            "use `arl sweep <dir>` to scan a folder"
+        )
+        raise typer.Exit(1)
     bundle = _friendly_or_exit(lambda: _load_any_trace(path))
     bundle = bundle.with_prescriptions(analyze_bundle(bundle))
     receipts = build_receipts(bundle)
@@ -545,10 +575,24 @@ def _load_bundle_or_exit(db: Path, run_id: str):
 def _friendly_or_exit(action: Callable[[], T]) -> T:
     try:
         return action()
+    except FileNotFoundError as exc:
+        # First-user polish: a typo'd path must read as a plain sentence, not a raw
+        # platform error ("[WinError 2] The system cannot find the file specified").
+        target = exc.filename or ""
+        console.print(f"error: file not found: {target}".rstrip(": "))
+        raise typer.Exit(1) from exc
+    except IsADirectoryError as exc:
+        where = f": {exc.filename}" if exc.filename else ""
+        console.print(
+            f"error: that is a directory, not a session file{where} "
+            "(use `arl sweep <dir>` to scan a folder)"
+        )
+        raise typer.Exit(1) from exc
     except (
-        # OSError covers FileNotFound, PermissionError, IsADirectoryError, and
-        # every other OS-level read failure — a directory or unreadable path must
-        # produce a typed exit-1 error, never a traceback (Codex finding, 2026-06-10).
+        # OSError covers PermissionError and every other OS-level read failure — a
+        # directory or unreadable path must produce a typed exit-1 error, never a
+        # traceback (Codex finding, 2026-06-10). FileNotFound/IsADirectory are
+        # handled above with friendlier wording.
         OSError,
         json.JSONDecodeError,
         TraceParseError,

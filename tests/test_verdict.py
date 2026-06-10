@@ -67,13 +67,26 @@ def test_verdict_missing_path_and_no_latest_is_an_error(tmp_path: Path) -> None:
 
 def test_verdict_directory_input_fails_closed_no_traceback(tmp_path: Path) -> None:
     """Codex advisor finding (2026-06-10): a directory produced a raw traceback.
-    Fail-closed means TYPED error + exit 1 on every unreadable input shape."""
+    Fail-closed means TYPED error + exit 1 on every unreadable input shape.
+    First-user polish (2026-06-11): the message is a plain sentence pointing at
+    `sweep`, never a raw [WinError]/[Errno] platform string."""
     some_dir = tmp_path / "a_directory"
     some_dir.mkdir()
     result = _invoke(["verdict", str(some_dir), "--db", str(tmp_path / "l.sqlite")])
     assert result.exit_code == 1, result.output
     assert "error" in result.output.lower()
     assert "Traceback" not in result.output
+    assert "directory" in result.output.lower() and "sweep" in result.output.lower()
+    assert "WinError" not in result.output and "Errno" not in result.output
+
+
+def test_verdict_missing_path_message_is_friendly(tmp_path: Path) -> None:
+    """A typo'd / missing file reads as a plain 'file not found', never a raw
+    platform error string."""
+    result = _invoke(["verdict", "./definitely-not-here.jsonl", "--db", str(tmp_path / "l.sqlite")])
+    assert result.exit_code == 1, result.output
+    assert "file not found" in result.output.lower()
+    assert "WinError" not in result.output and "Errno" not in result.output
 
 
 # ------------------------------------------------------- coverage honesty
