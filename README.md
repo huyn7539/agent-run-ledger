@@ -19,10 +19,10 @@ server, no telemetry, no network code in the package (enforced by tests).
 
 ## Quick Start
 
-Install the checkout in editable mode:
+Install the `arl` command (no account, no config, nothing leaves your machine):
 
 ```powershell
-uv pip install -e .
+uv tool install .
 ```
 
 See the alarm work first (a bundled known-bad run through the real pipeline),
@@ -42,11 +42,11 @@ the honest answer.
 Or the classic ledger flow:
 
 ```powershell
-arl init
-arl run-demo --variant retry-loop
+arl run-demo --variant retry-loop    # stores run "run_retry_loop"
+arl run-demo --variant clean         # stores run "run_clean_demo"
 arl list-runs
-arl report --run <RUN_ID>
-arl compare --left <RUN_ID_A> --right <RUN_ID_B>
+arl report --run run_retry_loop
+arl compare --left run_retry_loop --right run_clean_demo
 ```
 
 ## Verdict mode — the loop contract

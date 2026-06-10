@@ -35,7 +35,7 @@ def test_cli_demo_report_compare(tmp_path: Path) -> None:
 
     result = runner.invoke(
         app,
-        ["compare", "--left", "run_retry_loop", "--right", "run_clean", "--db", str(db)],
+        ["compare", "--left", "run_retry_loop", "--right", "run_clean_demo", "--db", str(db)],
     )
     assert result.exit_code == 0
     assert "failed -> passed" in result.output
@@ -137,11 +137,13 @@ def test_cli_export_happy_roundtrip(tmp_path: Path) -> None:
     out = tmp_path / "trace.json"
     runner.invoke(app, ["run-demo", "--variant", "clean", "--db", str(db)])
 
-    result = runner.invoke(app, ["export", "--run", "run_clean", "--out", str(out), "--db", str(db)])
+    result = runner.invoke(
+        app, ["export", "--run", "run_clean_demo", "--out", str(out), "--db", str(db)]
+    )
 
     assert result.exit_code == 0
     assert "wrote trace" in result.output
-    assert json.loads(out.read_text(encoding="utf-8"))["run"]["id"] == "run_clean"
+    assert json.loads(out.read_text(encoding="utf-8"))["run"]["id"] == "run_clean_demo"
 
 
 def test_cli_export_missing_run_clean_error(tmp_path: Path) -> None:
