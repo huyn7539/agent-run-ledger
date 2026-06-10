@@ -17,13 +17,31 @@ them different.)
 Everything runs on your machine. Prompt/output content never leaves it. There is no
 server, no telemetry, no network code in the package (enforced by tests).
 
-## Quick Start
+## Install
 
-Install the `arl` command (no account, no config, nothing leaves your machine):
+No account, no config, nothing leaves your machine. Pick whichever you have:
 
-```powershell
+```bash
+# with uv (https://docs.astral.sh/uv/) — installs the `arl` command on your PATH
 uv tool install .
+
+# or with pip / pipx
+pip install .            # into the current environment
+pipx install .           # isolated, on your PATH
 ```
+
+If `arl` isn't found after install (common on machines with several Pythons,
+where the `arl` on PATH may belong to a different interpreter), the always-correct
+invocation is:
+
+```bash
+python -m agent_run_ledger verdict --latest      # same as `arl verdict --latest`
+# or, from a checkout:  uv run arl verdict --latest
+```
+
+Requires Python 3.12+.
+
+## Quick Start
 
 See the alarm work first (a bundled known-bad run through the real pipeline),
 then grade your newest local agent session:
