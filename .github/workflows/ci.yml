@@ -6,7 +6,17 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Test on BOTH OSes. The Windows lane is load-bearing: the cp1252-console P0
+    # (a clean verdict crashing with UnicodeEncodeError -> exit 1) escaped review
+    # precisely because CI was Linux-only (UTF-8 by default) and CliRunner captures
+    # through a UTF-8 buffer — nothing exercised a legacy Windows code page. The
+    # cp1252 subprocess tests in tests/test_console_encoding.py only mean something
+    # on a real Windows runner.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -14,6 +24,13 @@ jobs:
         run: uv run --with pytest pytest
       - name: Run ruff
         run: uv run --with ruff ruff check .
+      - name: Smoke — clean verdict must exit 0 on a legacy code page (real binary, not CliRunner)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          PYTHONIOENCODING: cp1252
+          PYTHONUTF8: "0"
+        run: uv run python -m agent_run_ledger verdict fixtures/clean_run.json --db ci.sqlite
 
   live-sdk-gate:
     # The B1 demo-overfit guard (tests/test_live_capture_receipt.py) is gated by

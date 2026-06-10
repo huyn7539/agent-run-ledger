@@ -110,6 +110,31 @@ _BOOLEAN_FACT_KEYS = frozenset(
         "user_directed_deletion",
     }
 )
+
+# Full-suite-audit P2 (2026-06-11): a SUBSET of the allowlisted keys carries RAW
+# LOCAL CONTENT by design — the app-supplied patch target a receipt's diff needs
+# (a source line, a repo-relative path). Their VALUES are kept verbatim (unlike the
+# auto-captured fields the leak-matrix strips, and unlike the boolean fact keys
+# above which coerce to bool). They are LOCAL-ONLY: they live in the local sqlite
+# ledger and the local ``arl export`` JSON, and they TRAVEL if a user shares that
+# export. This is disclosed in ``core.io`` (export note) and ``core.receipt``
+# (``repair_artifact.patch`` is "NOT remote-egress-safe until Task 46"); the
+# allowed-metadata VALUE scrub (Task 46) is what makes a receipt remote-safe, and
+# is required before any egress path ships. ``tests/test_repair_target_locality.py``
+# pins this set closed so a new raw-content key forces a disclosure review.
+_RAW_CONTENT_METADATA_KEYS = frozenset(
+    {
+        "before",
+        "after",
+        "path",
+        "current_line",
+        "current_text",
+        "replacement_line",
+        "replacement_text",
+        "arl_patch_target",
+        "retry_budget_patch_target",
+    }
+)
 _SAFE_ERROR_MESSAGE = "details redacted"
 
 # L6: a hash-or-empty token — empty string, or a lowercase hex string. The

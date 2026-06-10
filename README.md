@@ -67,6 +67,16 @@ arl report --run run_retry_loop
 arl compare --left run_retry_loop --right run_clean_demo
 ```
 
+## How this differs from session observability
+
+Local session viewers (agenttrace and similar) tell you a run was *unhealthy* —
+cost, tokens, retries, tool failures, a health score. ARL answers a different
+question: did the run *lie*? It names a structural failure, hands back an applyable
+fix direction, and attaches an **honest proof grade** with the limits stated — and
+on a healthy run it says nothing, on purpose. It competes on graded correctness,
+abstain-by-default, and the fix artifact, not on how many log formats it reads.
+Point a tracer at the run for health; point ARL at it for a verdict.
+
 ## Verdict mode — the loop contract
 
 Autonomous loops today exit on tests-pass, string matching, or the agent's own
