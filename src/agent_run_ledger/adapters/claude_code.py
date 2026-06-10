@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_run_ledger.core.io import TraceParseError, _check_depth
 from agent_run_ledger.core.models import (
     RunRecord,
     StepRecord,
@@ -107,6 +108,11 @@ def load_claude_session(path: Path) -> list[dict[str, Any]]:
         line_count += 1
         if line_count > MAX_SESSION_LINES:
             raise ClaudeCodeSessionError(f"session has too many lines: > {MAX_SESSION_LINES}")
+        # Per-line depth bound (cold-review 2026-06-11) — see adapters.codex note.
+        try:
+            _check_depth(line)
+        except TraceParseError as exc:
+            raise ClaudeCodeSessionError(f"hostile nesting at line {lineno}: {exc}") from exc
         try:
             obj = json.loads(line)
         except json.JSONDecodeError as exc:

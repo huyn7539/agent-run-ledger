@@ -122,3 +122,32 @@ def test_valid_trace_still_loads(tmp_path: Path) -> None:
     bundle = load_trace(p)
 
     assert bundle.run.id == "t"
+
+
+# --- JSONL adapter depth guard (cold-review finding, 2026-06-11) -----------------
+# The single-object path bounds nesting BEFORE json.loads; the two JSONL adapters
+# parsed each line unguarded, so one pathologically nested line could stress the
+# C stack. Both loaders must reject a depth-bomb line with their typed error.
+
+
+def test_codex_loader_rejects_depth_bomb_line(tmp_path: Path) -> None:
+    from agent_run_ledger.adapters.codex import CodexRolloutError, load_codex_rollout
+
+    bomb = "[" * 5000 + "1" + "]" * 5000
+    p = tmp_path / "rollout-2026-06-11T00-00-00-x.jsonl"
+    p.write_text('{"type":"session_meta"}\n{"payload":' + bomb + "}\n", encoding="utf-8")
+    with pytest.raises(CodexRolloutError, match="depth"):
+        load_codex_rollout(p)
+
+
+def test_claude_loader_rejects_depth_bomb_line(tmp_path: Path) -> None:
+    from agent_run_ledger.adapters.claude_code import (
+        ClaudeCodeSessionError,
+        load_claude_session,
+    )
+
+    bomb = "[" * 5000 + "1" + "]" * 5000
+    p = tmp_path / "session.jsonl"
+    p.write_text('{"sessionId":"s","uuid":"u","type":"user"}\n{"x":' + bomb + "}\n", encoding="utf-8")
+    with pytest.raises(ClaudeCodeSessionError, match="depth"):
+        load_claude_session(p)

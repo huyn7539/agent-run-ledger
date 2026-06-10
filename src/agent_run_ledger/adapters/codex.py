@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_run_ledger.core.io import TraceParseError, _check_depth
 from agent_run_ledger.core.models import (
     RunRecord,
     StepRecord,
@@ -134,6 +135,13 @@ def load_codex_rollout(path: Path) -> list[dict[str, Any]]:
             raise CodexRolloutError(
                 f"rollout has too many lines: > {MAX_ROLLOUT_LINES}"
             )
+        # Per-line depth bound (cold-review 2026-06-11): the file-level size cap
+        # does not stop ONE pathologically nested line from stressing the C stack
+        # inside json.loads. Reuse core.io's pre-parse depth check, typed here.
+        try:
+            _check_depth(line)
+        except TraceParseError as exc:
+            raise CodexRolloutError(f"hostile nesting at line {lineno}: {exc}") from exc
         try:
             obj = json.loads(line)
         except json.JSONDecodeError as exc:
