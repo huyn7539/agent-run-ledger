@@ -248,3 +248,18 @@ def test_verdict_latest_empty_root_fails_closed(tmp_path: Path) -> None:
     )
     assert result.exit_code == 1, result.output
     assert "error" in result.output.lower()
+
+
+def test_verdict_exit_code_survives_broken_pipe(tmp_path: Path, monkeypatch) -> None:
+    """The exit contract must survive a consumer that closes the pipe early
+    (`| head`, crashed hook): write failure is swallowed, exit code kept."""
+    import typer as _typer
+
+    def _boom(*args, **kwargs):
+        raise BrokenPipeError
+
+    monkeypatch.setattr(_typer, "echo", _boom)
+    result = _invoke(
+        ["verdict", "fixtures/golden_retry_loop.json", "--db", str(tmp_path / "l.sqlite"), "--json"]
+    )
+    assert result.exit_code == 3, result.output

@@ -56,6 +56,14 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_run_ledger.adapters._facts import (
+    claim_follows_from_events,
+    command_is_read_only,
+    deleted_test_paths,
+    instruction_directs_deletion,
+    is_change_request,
+    is_completion_claim,
+)
 from agent_run_ledger.core.io import TraceParseError, _check_depth
 from agent_run_ledger.core.models import (
     RunRecord,
@@ -267,6 +275,7 @@ def _steps_from_records(
     records: list[dict[str, Any]], run_id: str, session_id: str
 ) -> list[StepRecord]:
     outputs = _results_by_tool_use_id(records)
+    claim_follows = _completion_claim_follows_index(records)
 
     turn_index = 0
     turn_open = False
@@ -274,8 +283,12 @@ def _steps_from_records(
     segment = 0
     steps: list[StepRecord] = []
     call_seq = 0
+    # Transient capture-time state for the success-lie FACTS (Task 58). Raw text
+    # is read here, classified to booleans, and dropped — never stored.
+    last_human_text: str | None = None
+    change_request_seen = False
 
-    for rec in records:
+    for index, rec in enumerate(records):
         rtype = rec.get("type")
         if rtype == "user":
             result_ids = _tool_result_ids(rec)
@@ -291,6 +304,9 @@ def _steps_from_records(
                 segment += 1
                 turn_open = False
                 open_turn_call_ids = set()
+                last_human_text = _human_text(rec)
+                if is_change_request(last_human_text):
+                    change_request_seen = True
             continue
         if rtype != "assistant":
             continue
@@ -314,9 +330,125 @@ def _steps_from_records(
                     segment=segment,
                     seq=call_seq,
                     result=outputs.get(call_id),
+                    facts=_success_lie_facts(
+                        block=block,
+                        last_human_text=last_human_text,
+                        change_request_seen=change_request_seen,
+                        claim_follows=claim_follows[index],
+                    ),
                 )
             )
     return steps
+
+
+# --------------------------------------------------------------------------- #
+# Success-lie FACTS (Task 58) — bounded booleans computed at capture
+# --------------------------------------------------------------------------- #
+# Tool names that can mutate files vs. names that are provably read-only. An
+# UNKNOWN name (MCP tools, future tools) counts as mutating — that makes the R2
+# detector ABSTAIN, which is the precision-safe default.
+_READ_ONLY_TOOL_NAMES = frozenset(
+    {"read", "glob", "grep", "ls", "notebookread", "webfetch", "websearch", "todoread"}
+)
+
+
+def _success_lie_facts(
+    *,
+    block: dict[str, Any],
+    last_human_text: str | None,
+    change_request_seen: bool,
+    claim_follows: bool,
+) -> dict[str, Any]:
+    """The content-free fact dict for one tool_use block. Booleans only; the raw
+    command/instruction text used to compute them is never stored."""
+    name = str(block.get("name") or "unknown-tool")
+    raw_input = block.get("input")
+    command = ""
+    if name.lower() == "bash" and isinstance(raw_input, dict):
+        raw_command = raw_input.get("command")
+        command = raw_command if isinstance(raw_command, str) else ""
+
+    facts: dict[str, Any] = {"mutating": _tool_call_is_mutating(name, command)}
+    if change_request_seen:
+        facts["change_request"] = True
+    if claim_follows:
+        facts["completion_claim_follows"] = True
+    deleted = deleted_test_paths(command) if command else []
+    if deleted:
+        facts["deletes_test_path"] = True
+        if last_human_text is not None and instruction_directs_deletion(
+            last_human_text, deleted
+        ):
+            facts["user_directed_deletion"] = True
+    return facts
+
+
+def _tool_call_is_mutating(name: str, command: str) -> bool:
+    """False ONLY when the call is provably read-only (allowlisted tool name, or
+    a Bash command whose every segment is allowlisted). Unknown -> True (R2 then
+    abstains — fail closed in the precision direction)."""
+    lowered = name.lower()
+    if lowered in _READ_ONLY_TOOL_NAMES:
+        return False
+    if lowered == "bash":
+        return not command_is_read_only(command)
+    return True
+
+
+def _human_text(rec: dict[str, Any]) -> str:
+    """The raw text of a human-instruction record (transient; never stored)."""
+    message = rec.get("message")
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(b.get("text") or "")
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
+def _assistant_text(rec: dict[str, Any]) -> str:
+    return " ".join(
+        str(b.get("text") or "")
+        for b in _content_blocks(rec)
+        if isinstance(b, dict) and b.get("type") == "text"
+    )
+
+
+def _has_tool_use(rec: dict[str, Any]) -> bool:
+    return any(
+        isinstance(b, dict) and b.get("type") == "tool_use" for b in _content_blocks(rec)
+    )
+
+
+def _completion_claim_follows_index(records: list[dict[str, Any]]) -> list[bool]:
+    """Per record index: does a TERMINAL assistant completion claim occur later
+    in the session with NO intervening human instruction?
+
+    TERMINAL means no assistant tool_use between the claim and the next human
+    instruction (or end of session): "let me make sure all tests pass" followed
+    by a pytest call is work-in-progress narration, not a claim. The terminality
+    requirement plus the bounded marker list is the firing-side precision guard."""
+    n = len(records)
+    is_human = [False] * n
+    has_tool = [False] * n
+    is_claim = [False] * n
+    for i, rec in enumerate(records):
+        rtype = rec.get("type")
+        if rtype == "user":
+            if not _tool_result_ids(rec) and _is_human_instruction(rec):
+                is_human[i] = True
+        elif rtype == "assistant":
+            has_tool[i] = _has_tool_use(rec)
+            text = _assistant_text(rec)
+            if text and not has_tool[i] and is_completion_claim(text):
+                is_claim[i] = True
+    return claim_follows_from_events(is_human, has_tool, is_claim)
 
 
 def _step_from_tool_use(
@@ -329,6 +461,7 @@ def _step_from_tool_use(
     segment: int,
     seq: int,
     result: dict[str, Any] | None,
+    facts: dict[str, Any] | None = None,
 ) -> StepRecord:
     name = str(block.get("name") or "unknown-tool")
     started_at = str(rec.get("timestamp") or "")
@@ -366,6 +499,9 @@ def _step_from_tool_use(
         error=raw_error,
         error_class=classify_error(raw_error),
         redaction_mode="metadata_only",
+        # Task 58: bounded success-lie FACTS (booleans only; sanitize_metadata
+        # allowlists the keys). The raw content they were computed from is gone.
+        metadata=dict(facts or {}),
     )
 
 

@@ -59,6 +59,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from agent_run_ledger.adapters._facts import (
+    apply_patch_deleted_test_paths,
+    claim_follows_from_events,
+    command_is_read_only,
+    deleted_test_paths,
+    instruction_directs_deletion,
+    is_change_request,
+    is_completion_claim,
+)
 from agent_run_ledger.core.io import TraceParseError, _check_depth
 from agent_run_ledger.core.models import (
     RunRecord,
@@ -236,6 +245,7 @@ def _steps_from_records(
     ``call_id`` and synthesizing the per-turn parent from output-delimited turn
     boundaries (see module docstring)."""
     outputs = _outputs_by_call_id(records)
+    claim_follows = _completion_claim_follows_index(records)
 
     # Synthesize turn ids: a tool-call OUTPUT closes the current turn; the next
     # tool call opens a fresh turn. Consecutive calls before the next output share
@@ -246,8 +256,12 @@ def _steps_from_records(
     segment = 0  # bumped on a user-message boundary; partitions retry_scope (A1)
     steps: list[StepRecord] = []
     call_seq = 0
+    # Transient capture-time state for the success-lie FACTS (Task 58). Raw text
+    # is read here, classified to booleans, and dropped — never stored.
+    last_human_text: str | None = None
+    change_request_seen = False
 
-    for rec in records:
+    for index, rec in enumerate(records):
         payload = rec.get("payload")
         if not isinstance(payload, dict):
             continue
@@ -261,6 +275,10 @@ def _steps_from_records(
             segment += 1
             turn_open = False
             open_turn_call_ids = set()
+            message = payload.get("message")
+            last_human_text = message if isinstance(message, str) else ""
+            if is_change_request(last_human_text):
+                change_request_seen = True
             continue
         if ptype in _TOOL_OUTPUT_TYPES:
             # A tool result closes the turn so the NEXT call starts a new one — BUT
@@ -296,9 +314,100 @@ def _steps_from_records(
                 segment=segment,
                 seq=call_seq,
                 outputs=outputs,
+                facts=_success_lie_facts(
+                    payload=payload,
+                    last_human_text=last_human_text,
+                    change_request_seen=change_request_seen,
+                    claim_follows=claim_follows[index],
+                ),
             )
         )
     return steps
+
+
+# --------------------------------------------------------------------------- #
+# Success-lie FACTS (Task 58) — bounded booleans computed at capture
+# --------------------------------------------------------------------------- #
+def _command_text(payload: dict[str, Any]) -> str:
+    """The raw command an ``exec_command``-style call runs (transient; never
+    stored). ``arguments`` is a JSON string carrying ``cmd`` (a string) or
+    ``command`` (a string or argv list). Unparseable -> ''."""
+    raw = payload.get("arguments")
+    if not isinstance(raw, str):
+        return ""
+    try:
+        args = json.loads(raw)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(args, dict):
+        return ""
+    cmd = args.get("cmd")
+    if isinstance(cmd, str):
+        return cmd
+    command = args.get("command")
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list):
+        return " ".join(str(part) for part in command)
+    return ""
+
+
+def _success_lie_facts(
+    *,
+    payload: dict[str, Any],
+    last_human_text: str | None,
+    change_request_seen: bool,
+    claim_follows: bool,
+) -> dict[str, Any]:
+    """The content-free fact dict for one tool-call payload. Booleans only; the
+    raw command/patch/instruction text used to compute them is never stored."""
+    name = str(payload.get("name") or "unknown-tool").lower()
+    if name == "apply_patch":
+        # apply_patch always mutates; its structured "*** Delete File:" lines are
+        # Codex's other test-deletion vector.
+        deleted = apply_patch_deleted_test_paths(payload.get("input"))
+        mutating = True
+    else:
+        command = _command_text(payload)
+        deleted = deleted_test_paths(command) if command else []
+        # Unknown tool name or unparseable command -> mutating (R2 abstains).
+        mutating = not command_is_read_only(command)
+
+    facts: dict[str, Any] = {"mutating": mutating}
+    if change_request_seen:
+        facts["change_request"] = True
+    if claim_follows:
+        facts["completion_claim_follows"] = True
+    if deleted:
+        facts["deletes_test_path"] = True
+        if last_human_text is not None and instruction_directs_deletion(
+            last_human_text, deleted
+        ):
+            facts["user_directed_deletion"] = True
+    return facts
+
+
+def _completion_claim_follows_index(records: list[dict[str, Any]]) -> list[bool]:
+    """Per record index: does a TERMINAL assistant completion claim occur later
+    with NO intervening user message? (See _facts.claim_follows_from_events.)"""
+    n = len(records)
+    is_human = [False] * n
+    has_tool = [False] * n
+    is_claim = [False] * n
+    for i, rec in enumerate(records):
+        payload = rec.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ptype = payload.get("type")
+        if ptype in _USER_MESSAGE_TYPES:
+            is_human[i] = True
+        elif ptype in _TOOL_CALL_TYPES:
+            has_tool[i] = True
+        elif ptype == "agent_message":
+            message = payload.get("message")
+            if isinstance(message, str) and is_completion_claim(message):
+                is_claim[i] = True
+    return claim_follows_from_events(is_human, has_tool, is_claim)
 
 
 def _step_from_call(
@@ -311,6 +420,7 @@ def _step_from_call(
     segment: int,
     seq: int,
     outputs: dict[str, dict[str, Any]],
+    facts: dict[str, Any] | None = None,
 ) -> StepRecord:
     name = str(payload.get("name") or "unknown-tool")
     call_id = payload.get("call_id")
@@ -372,6 +482,9 @@ def _step_from_call(
         error=raw_error,
         error_class=classify_error(raw_error),
         redaction_mode="metadata_only",
+        # Task 58: bounded success-lie FACTS (booleans only; sanitize_metadata
+        # allowlists the keys). The raw content they were computed from is gone.
+        metadata=dict(facts or {}),
     )
 
 

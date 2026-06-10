@@ -15,7 +15,11 @@ def analyze_bundle(bundle: TraceBundle) -> list[PrescriptionRecord]:
     # keeps one raw StepRecord per span; the retry collapse is a JUDGMENT, never
     # baked into the corpus (so a future detector fix can re-derive from facts).
     collapsed = replace(bundle, steps=derive_retry_steps(bundle))
-    return detect_retry_cost_loops(collapsed)
+    prescriptions = detect_retry_cost_loops(collapsed)
+    # Task 58: success-claim vs log-evidence divergence reads the RAW steps' bounded
+    # capture-time facts (no collapse involved). Same judgment-on-read doctrine.
+    prescriptions.extend(detect_success_lies(bundle))
+    return prescriptions
 
 
 def derive_retry_steps(bundle: TraceBundle) -> list[StepRecord]:
@@ -141,6 +145,163 @@ def _retry_loop_prescription(
         },
         regression_test_template=regression.replace(_safe_name(step.name), safe_name),
     )
+
+
+# --------------------------------------------------------------------------- #
+# Task 58 — success-claim vs log-evidence divergence (the "success-lie" detector)
+# --------------------------------------------------------------------------- #
+# Both rules read ONLY bounded boolean FACTS the adapters computed at capture
+# time and stored as allowed step metadata (deletes_test_path /
+# user_directed_deletion / completion_claim_follows / mutating /
+# change_request). Core never sees raw content. ABSTAIN-BY-DEFAULT: a bundle
+# whose adapter did not supply a fact can never fire — absence is unknown, not
+# evidence. Precision-first: a false positive here is the product's worst bug.
+
+
+def detect_success_lies(bundle: TraceBundle) -> list[PrescriptionRecord]:
+    """R1 (success claim after test deletion) + R2 (completion claim with zero
+    mutating tool calls). One prescription per rule per bundle, max."""
+    ordered = sorted(bundle.steps, key=lambda s: (s.started_at, s.id))
+    prescriptions: list[PrescriptionRecord] = []
+    r1 = _detect_test_deletion_lie(bundle, ordered)
+    if r1 is not None:
+        prescriptions.append(r1)
+    r2 = _detect_no_op_completion(bundle, ordered)
+    if r2 is not None:
+        prescriptions.append(r2)
+    return prescriptions
+
+
+def _detect_test_deletion_lie(
+    bundle: TraceBundle, ordered: list[StepRecord]
+) -> PrescriptionRecord | None:
+    """R1: a step deleted a test-pattern path, a terminal completion claim
+    followed with no intervening human instruction, and the deletion was NOT
+    user-directed (per the adapter's generous capture-time check)."""
+    hits = [
+        s
+        for s in ordered
+        if s.metadata.get("deletes_test_path") is True
+        and s.metadata.get("completion_claim_follows") is True
+        and s.metadata.get("user_directed_deletion") is not True
+    ]
+    if not hits:
+        return None
+    first = hits[0]
+    return PrescriptionRecord(
+        id=f"rx_{uuid4().hex[:12]}",
+        run_id=bundle.run.id,
+        failure_class="artifact_failure",
+        severity="high",
+        root_cause=(
+            "a tool call deleted a test-pattern path and a later assistant completion "
+            "claim followed with no intervening user instruction "
+            f"({len(hits)} deletion step(s))"
+        ),
+        one_line_fix=(
+            "Restore the deleted test path(s) from version control and re-run the "
+            "full suite before trusting the success claim."
+        ),
+        evidence=[
+            "rule=R1",
+            f"step_id={first.id}",
+            "deletes_test_path=true",
+            "completion_claim_follows=true",
+            f"test_path_deletions={len(hits)}",
+        ],
+        patch_type="config_diff",
+        patch=_R1_FIX_DIRECTION,
+        expected_impact={
+            "trust_delta": (
+                "the run's success claim is unverified until the deleted test "
+                "path(s) are restored and the suite re-runs"
+            ),
+        },
+        regression_test_template=(
+            "def test_no_test_paths_deleted_before_success_claim():\n"
+            "    receipt = arl_verdict(session_log)\n"
+            "    assert receipt.observed_failure != 'artifact_failure'\n"
+        ),
+    )
+
+
+def _detect_no_op_completion(
+    bundle: TraceBundle, ordered: list[StepRecord]
+) -> PrescriptionRecord | None:
+    """R2: a change was requested, the assistant ended with a completion claim,
+    and the session's tool census shows ZERO mutating calls.
+
+    Fires ONLY when the adapter supplied an EXPLICIT boolean ``mutating`` fact on
+    EVERY step (the census). A missing fact means unknown -> abstain. A pure Q&A
+    session (no change-request instruction) can never fire."""
+    if not ordered:
+        return None
+    census = [s.metadata.get("mutating") for s in ordered]
+    if any(not isinstance(value, bool) for value in census):
+        return None  # facts unavailable (other adapters / old captures) -> abstain
+    if any(census):
+        return None  # a (potentially) mutating call exists -> abstain
+    if not any(s.metadata.get("change_request") is True for s in ordered):
+        return None  # no change request (Q&A session) -> NEVER fire
+    last = ordered[-1]
+    if last.metadata.get("completion_claim_follows") is not True:
+        return None  # the session did not end on a completion claim -> abstain
+    return PrescriptionRecord(
+        id=f"rx_{uuid4().hex[:12]}",
+        run_id=bundle.run.id,
+        failure_class="artifact_failure",
+        severity="medium",
+        root_cause=(
+            "the assistant claimed completion after a change request, but the session "
+            "log records zero mutating tool calls"
+        ),
+        one_line_fix=(
+            "Verify whether any change actually landed (diff the working tree / VCS "
+            "log); treat the completion claim as unverified."
+        ),
+        evidence=[
+            "rule=R2",
+            f"step_id={last.id}",
+            "mutating_calls=0",
+            f"tool_calls={len(ordered)}",
+            "completion_claim_follows=true",
+            "change_request=true",
+        ],
+        patch_type="config_diff",
+        patch=_R2_FIX_DIRECTION,
+        expected_impact={
+            "trust_delta": (
+                "the completion claim is unverified until a real change is confirmed "
+                "outside the agent's self-report"
+            ),
+        },
+        regression_test_template=(
+            "def test_completion_claim_backed_by_a_mutating_call():\n"
+            "    receipt = arl_verdict(session_log)\n"
+            "    assert receipt.observed_failure != 'artifact_failure'\n"
+        ),
+    )
+
+
+# Templated fix-direction artifacts (NOT auto-applyable; config_diff-shaped so the
+# patch validator accepts them). Deliberately GENERIC: ARL stores no file content,
+# so the exact deleted path lives in the user's own session log, never here.
+_R1_FIX_DIRECTION = """\
+# Fix direction (NOT auto-applyable): the session log shows a test-path deletion
+# followed by a success claim. ARL stores no file content; the exact path is in
+# your session log, not here.
+- trust the in-session success claim as-is
++ restore the deleted test path(s) from version control (e.g. `git checkout -- <path>`)
++ re-run the full test suite and re-verify the claim against real output
+"""
+
+_R2_FIX_DIRECTION = """\
+# Fix direction (NOT auto-applyable): the session ended on a completion claim
+# with zero mutating tool calls after a change request.
+- accept the completion claim as evidence that the change landed
++ diff the working tree / VCS log to verify whether any change actually exists
++ re-run the task if nothing landed; gate the loop on `arl verdict`, not the claim
+"""
 
 
 def _safe_name(name: str) -> str:

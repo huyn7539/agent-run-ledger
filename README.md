@@ -116,6 +116,18 @@ done
 arl verdict --latest --json | Out-File verdict.json   # 0 clean / 3 receipts / 1 error
 ```
 
+**Sweep an existing archive (months of evidence you already own):**
+
+```powershell
+arl sweep ~/.claude/projects --json    # batch-verdict every session log under a root
+arl sweep ~/.codex/sessions
+```
+
+`sweep` is read-only by default (`--save` to record), caps at `--limit 200`
+newest-first, and exits 0 (no receipts anywhere) / 3 (any file fired) / 1
+(total failure: nothing readable). Per-file errors are counted and shown, never
+silently skipped.
+
 **A Claude Code Stop hook (receipt on every finished session, zero remembered steps):**
 
 ```jsonc
@@ -152,9 +164,12 @@ evaluated. Trace content never leaves the machine.
 
 Included: provider-neutral trace schema · local SQLite storage · JSON import/export ·
 static HTML report · run comparison · retry/cost-loop prescription with patch
-artifact · graded RepairReceipts (L0–L2 implemented honestly) · verdict mode with
-the loop exit contract · OpenAI + Codex adapters isolated outside the core package ·
-read-only Claude/Codex review bus under `.agentbus/`.
+artifact · success-lie detector (R1 success claim after test deletion, R2
+completion claim with zero mutating calls; graded L0–L1, abstain-by-default) ·
+graded RepairReceipts (L0–L2 implemented honestly) · verdict mode with
+the loop exit contract · archive sweep (`arl sweep`) · OpenAI + Codex adapters
+isolated outside the core package · read-only Claude/Codex review bus under
+`.agentbus/`.
 
 Not included: hosted SaaS · auth/billing · public dashboard · memory graph ·
 autonomous patch application · telemetry of any kind.

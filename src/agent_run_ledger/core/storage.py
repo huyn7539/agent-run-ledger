@@ -150,7 +150,9 @@ def init_db(db_path: Path) -> None:
                 ),
                 patch TEXT NOT NULL,
                 expected_impact_json TEXT NOT NULL,
-                regression_test_template TEXT NOT NULL
+                regression_test_template TEXT NOT NULL,
+                failure_class TEXT NOT NULL DEFAULT 'retry_loop'
+                    CHECK (failure_class IN ('retry_loop', 'artifact_failure'))
             );
             """
         )
@@ -183,6 +185,12 @@ def init_db(db_path: Path) -> None:
         # Trace-derived retry FACTS (content-free); additive, nullable.
         _ensure_column(conn, "steps", "retry_scope", "TEXT")
         _ensure_column(conn, "steps", "input_fingerprint", "TEXT")
+        # Task 58: bounded failure class on the (recomputable) judgment side.
+        # ALTER ADD COLUMN cannot carry CHECK; the model layer enforces the
+        # closed vocabulary (models._failure_class) — same split as billing_mode.
+        _ensure_column(
+            conn, "prescriptions", "failure_class", "TEXT NOT NULL DEFAULT 'retry_loop'"
+        )
         # Stamp the file's DDL version. Stays put once at USER_VERSION (no DDL on
         # the hot path → user_version does not increment on repeat init).
         current = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -283,8 +291,8 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
                 """
                 INSERT INTO prescriptions (
                     id, run_id, severity, root_cause, one_line_fix, evidence_json, patch_type, patch,
-                    expected_impact_json, regression_test_template
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    expected_impact_json, regression_test_template, failure_class
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     prescription.id,
@@ -297,6 +305,7 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
                     prescription.patch,
                     json.dumps(prescription.expected_impact, sort_keys=True),
                     prescription.regression_test_template,
+                    prescription.failure_class,
                 ),
             )
     # L11: re-assert tight perms after writing the bundle.
@@ -410,6 +419,7 @@ def _prescription_from_row(row: sqlite3.Row) -> PrescriptionRecord:
             "patch": row["patch"],
             "expected_impact": json.loads(row["expected_impact_json"]),
             "regression_test_template": row["regression_test_template"],
+            "failure_class": _row_get(row, "failure_class", "retry_loop"),
         },
         row["run_id"],
     )

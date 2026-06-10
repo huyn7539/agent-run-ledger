@@ -193,6 +193,19 @@ EXIT_CLEAN = 0
 EXIT_RECEIPTS = 3
 VERDICT_SCHEMA = "arl.verdict/v1"
 
+
+def _echo_json(payload: dict) -> None:
+    """Stdout JSON for hooks/loops — byte-for-byte parseable (typer.echo, not rich).
+
+    A consumer that closes the pipe early (`| head`, a crashed hook) must not let a
+    broken-pipe teardown mask the EXIT CONTRACT: the verdict already happened and
+    the exit code is the product (found live 2026-06-11: truncated pipe turned a
+    real exit 3 into -1). Swallow the write failure; keep the exit code."""
+    try:
+        typer.echo(json.dumps(payload, indent=2))
+    except (BrokenPipeError, OSError):
+        pass
+
 # Coverage honesty (2026-06-10 gauntlet, convergent fix #1): a 'clean' that does
 # not name its checked classes gets read as "agent output verified" — which this
 # tool does NOT claim. Every verdict states what was and was not checked.
@@ -201,11 +214,13 @@ DETECTOR_COVERAGE = {
     "checked": [
         "retry_loop: autonomous same-tool same-input repeated failures "
         "(incl. cross-turn), graded L0-L2",
+        "artifact_failure: success-claim vs log-evidence divergence "
+        "(R1 test-deletion, R2 no-op completion), graded L0-L1",
     ],
     "not_checked": [
         "specification failure (agent built the wrong thing)",
-        "artifact failure / wrong-but-passing patch (incl. success claims "
-        "contradicted by the session log)",
+        "wrong-but-passing patch beyond R1/R2 (e.g. assertion weakening, "
+        "'tests pass' claim with no test run after the last edit)",
         "context loss / continuity",
         "cost & quota attribution",
     ],
@@ -294,8 +309,7 @@ def verdict(
             "coverage": DETECTOR_COVERAGE,
             "receipts": [asdict(r) for r in receipts],
         }
-        # Plain stdout JSON (typer.echo, not rich): hooks parse this byte-for-byte.
-        typer.echo(json.dumps(payload, indent=2))
+        _echo_json(payload)
         raise typer.Exit(EXIT_RECEIPTS if receipts else EXIT_CLEAN)
 
     if not receipts:
@@ -304,8 +318,11 @@ def verdict(
             f"in {bundle.run.id}"
         )
         console.print(
-            "  checked: retry loops (detector v1) · NOT checked: spec failures, "
-            "artifact/wrong-but-green patches, context loss"
+            "  checked: retry loops · success-claim/log divergence (detector v1)"
+        )
+        console.print(
+            "  NOT checked: spec failures, wrong-but-green patches beyond R1/R2, "
+            "context loss"
         )
         console.print(
             "  clean ≠ verified-correct. Run `arl selftest` to see a receipt fire."
@@ -321,6 +338,140 @@ def verdict(
     console.print("  review before applying — ARL advises, you apply:")
     console.print(f"    arl report --run {bundle.run.id}")
     raise typer.Exit(EXIT_RECEIPTS)
+
+
+SWEEP_SCHEMA = "arl.sweep/v1"
+
+# The typed read errors a sweep tolerates PER FILE (the batch continues; the
+# verdict path's fail-closed contract becomes per-file accounting here).
+_SWEEP_READ_ERRORS = (
+    OSError,
+    json.JSONDecodeError,
+    TraceParseError,
+    TraceValidationError,
+    CodexRolloutError,
+    ClaudeCodeSessionError,
+    NoSpansCapturedError,
+)
+
+
+@app.command("sweep")
+def sweep(
+    root: Path = typer.Argument(
+        ..., help="Directory swept recursively for agent session logs (*.jsonl)."
+    ),
+    limit: int = typer.Option(
+        200, "--limit", help="Maximum session files to grade, newest first by mtime."
+    ),
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    json_out: bool = typer.Option(
+        False, "--json", help="Machine-readable arl.sweep/v1 JSON on stdout."
+    ),
+    save: bool = typer.Option(
+        False,
+        "--save/--no-save",
+        help="Record graded runs in the ledger (default: read-only sweep).",
+    ),
+) -> None:
+    """Batch-verdict every session log under a root (the archive sweep).
+
+    Exit 0 = no receipts anywhere (clean for the checked classes); exit 3 = at
+    least one file fired; exit 1 = total failure (root missing, nothing found,
+    or every file unreadable). Read-only by default — pass --save to record.
+    Per-file errors are counted and reported, never silently skipped; a
+    chat-only session (no tool calls) counts as no-run, not an error."""
+    if not root.is_dir():
+        console.print(f"error: sweep root is not a directory: {root}")
+        raise typer.Exit(1)
+    candidates = sorted(
+        root.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
+    )[: max(limit, 0)]
+    counts = {"clean": 0, "fired": 0, "no_run": 0, "error": 0}
+    results: list[dict] = []
+    for path in candidates:
+        try:
+            bundle = _load_any_trace(path)
+        except _SWEEP_READ_ERRORS as exc:
+            if "no run to record" in str(exc):
+                counts["no_run"] += 1
+                results.append({"path": str(path), "status": "no_run"})
+            else:
+                counts["error"] += 1
+                results.append({"path": str(path), "status": "error", "error": str(exc)})
+            continue
+        bundle = bundle.with_prescriptions(analyze_bundle(bundle))
+        receipts = build_receipts(bundle)
+        if save:
+            try:
+                save_bundle(db, bundle)
+            except RunAlreadyRecorded:
+                pass
+        if receipts:
+            counts["fired"] += 1
+            max_level = max((r.proof_level for r in receipts), key=PROOF_LEVELS.index)
+            results.append(
+                {
+                    "path": str(path),
+                    "status": "fired",
+                    "run_id": bundle.run.id,
+                    "receipt_count": len(receipts),
+                    "max_proof_level": max_level,
+                    "observed_failures": sorted({r.observed_failure for r in receipts}),
+                }
+            )
+        else:
+            counts["clean"] += 1
+            results.append({"path": str(path), "status": "clean", "run_id": bundle.run.id})
+
+    scanned = len(candidates)
+    total_failure = scanned == 0 or counts["error"] == scanned
+    exit_code = EXIT_RECEIPTS if counts["fired"] else (1 if total_failure else EXIT_CLEAN)
+
+    if json_out:
+        payload = {
+            "schema": SWEEP_SCHEMA,
+            "root": str(root),
+            "scanned": scanned,
+            "counts": counts,
+            "coverage": DETECTOR_COVERAGE,
+            "fired": [r for r in results if r["status"] == "fired"],
+            "errors": [r for r in results if r["status"] == "error"],
+        }
+        _echo_json(payload)
+        raise typer.Exit(exit_code)
+
+    if scanned == 0:
+        console.print(f"error: no session logs (*.jsonl) found under {root}")
+        raise typer.Exit(1)
+    console.print(f"sweep: {scanned} session file(s) under {root}")
+    console.print(
+        f"  clean={counts['clean']} fired={counts['fired']} "
+        f"no-run={counts['no_run']} error={counts['error']}"
+    )
+    def _rel(path_text: str) -> str:
+        try:
+            return str(Path(path_text).relative_to(root))
+        except ValueError:
+            return path_text
+
+    for r in results:
+        if r["status"] == "fired":
+            # soft_wrap: a path must never be hard-wrapped mid-name in a terminal.
+            console.print(
+                f"  FIRED {_rel(r['path'])} — {r['receipt_count']} receipt(s), "
+                f"max {r['max_proof_level']}, {', '.join(r['observed_failures'])}",
+                soft_wrap=True,
+            )
+    for r in results:
+        if r["status"] == "error":
+            console.print(f"  ERROR {_rel(r['path'])} — {r['error']}", soft_wrap=True)
+    if total_failure:
+        console.print("error: every scanned file was unreadable — nothing was graded")
+        raise typer.Exit(1)
+    console.print(
+        "  clean = clean for the checked classes only (see `arl verdict --json` coverage)"
+    )
+    raise typer.Exit(exit_code)
 
 
 @app.command("selftest")

@@ -45,6 +45,11 @@ def is_version_compatible(record_version: str, reader_version: str = SCHEMA_VERS
 PatchType = Literal["unified_diff", "code_snippet", "config_diff", "regression_test"]
 PATCH_TYPES: tuple[str, ...] = ("unified_diff", "code_snippet", "config_diff", "regression_test")
 
+# Closed set of detected failure classes a prescription can carry (Task 58).
+# Mirrors the PATCH_TYPES discipline: an out-of-vocabulary class on import is a
+# typed validation error (fail closed), never silently coerced.
+FAILURE_CLASSES: tuple[str, ...] = ("retry_loop", "artifact_failure")
+
 # L7: closed set of billing modes. The FULL enum is locked now — adding a member
 # later is a no-op; adding the column later would be a base migration.
 BILLING_MODES: tuple[str, ...] = (
@@ -59,12 +64,21 @@ _ALLOWED_METADATA_KEYS = {
     "after",
     "arl_patch_target",
     "before",
+    # Task 58 success-lie FACTS: bounded booleans computed in-adapter from raw
+    # content at capture time, BEFORE redaction (same doctrine as error_class —
+    # a bounded label computed at capture is a fact; the receipt is a judgment
+    # on read). Only True/False ever lands here — never a path, command, or
+    # claim text.
+    "change_request",
+    "completion_claim_follows",
     "cost_usd",
     "current_line",
     "current_text",
+    "deletes_test_path",
     "input_tokens",
     "max_tokens",
     "model",
+    "mutating",
     "output_tokens",
     "path",
     "replacement_line",
@@ -75,6 +89,7 @@ _ALLOWED_METADATA_KEYS = {
     "step_type",
     "total_tokens",
     "usage",
+    "user_directed_deletion",
 }
 _SAFE_ERROR_MESSAGE = "details redacted"
 
@@ -470,6 +485,11 @@ class PrescriptionRecord:
     patch: str
     expected_impact: dict[str, Any]
     regression_test_template: str
+    # Task 58: the bounded detected-failure class this prescription belongs to.
+    # Drives receipt branching (retry_loop grades L0-L2; artifact_failure grades
+    # L0-L1). Defaults to "retry_loop" so pre-Task-58 records/dicts upcast
+    # cleanly. Closed vocabulary — see FAILURE_CLASSES.
+    failure_class: str = "retry_loop"
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], run_id: str) -> PrescriptionRecord:
@@ -484,6 +504,7 @@ class PrescriptionRecord:
             patch=str(data.get("patch") or ""),
             expected_impact=dict(data.get("expected_impact") or {}),
             regression_test_template=str(data.get("regression_test_template") or ""),
+            failure_class=_failure_class(data.get("failure_class") or "retry_loop"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -497,6 +518,7 @@ class PrescriptionRecord:
             "patch": self.patch,
             "expected_impact": self.expected_impact,
             "regression_test_template": self.regression_test_template,
+            "failure_class": self.failure_class,
         }
 
 
@@ -572,6 +594,7 @@ class TraceBundle:
             if not math.isfinite(step.cost_usd):
                 raise TraceValidationError(f"step {step.id!r} has non-finite cost_usd")
         for prescription in self.prescriptions:
+            _failure_class(prescription.failure_class)
             _validate_patch_artifact(prescription)
 
     def with_prescriptions(self, prescriptions: list[PrescriptionRecord]) -> TraceBundle:
@@ -645,6 +668,13 @@ def _patch_type(value: Any) -> PatchType:
     if patch_type not in PATCH_TYPES:
         raise TraceValidationError(f"unsupported patch_type={patch_type!r}")
     return patch_type  # type: ignore[return-value]
+
+
+def _failure_class(value: Any) -> str:
+    failure_class = str(value)
+    if failure_class not in FAILURE_CLASSES:
+        raise TraceValidationError(f"unsupported failure_class={failure_class!r}")
+    return failure_class
 
 
 def _validate_patch_artifact(prescription: PrescriptionRecord) -> None:

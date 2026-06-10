@@ -48,6 +48,7 @@ PROOF_LEVELS: tuple[str, ...] = ("L0", "L1", "L2", "L3", "L4", "L5", "L6")
 # A receipt's failure label is a bounded vocabulary (proof-ladder doc).
 OBSERVED_FAILURES: tuple[str, ...] = (
     "retry_loop",
+    "artifact_failure",
     "schema_mismatch",
     "context_bloat",
     "model_misroute",
@@ -80,8 +81,15 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
     # a stored/imported prescription's free-form evidence is attacker-controllable, so
     # grading must come from the real facts, not the evidence string (Task 51 forged).
     derived_by_id = {s.id: s for s in derive_retry_steps(bundle)}
+    raw_by_id = {s.id: s for s in bundle.steps}
     receipts: list[RepairReceipt] = []
     for rx in bundle.prescriptions:
+        # Task 58: branch by the prescription's bounded failure class. The
+        # artifact_failure class grades L0-L1 only (success-claim/log divergence:
+        # relevance can be proven from the log; intent and correctness cannot).
+        if rx.failure_class == "artifact_failure":
+            receipts.append(_artifact_failure_receipt(bundle, rx, raw_by_id))
+            continue
         # This slice grades the retry-cap class only. A prescription whose
         # one_line_fix sets a retry budget is a retry_loop repair. The observed retry
         # count must be the CITED STEP's REAL retry_count (looked up in the derived
@@ -113,6 +121,151 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
             )
         )
     return receipts
+
+
+# --------------------------------------------------------------------------- #
+# Task 58 — artifact_failure receipts (success-claim vs log-evidence divergence)
+# --------------------------------------------------------------------------- #
+# Grading is FACT-CORROBORATED, never prescription-trusted (Task 51 lessons): a
+# stored/imported prescription claiming R1 earns L1 ONLY when the cited step's
+# bounded capture-time facts in the bundle corroborate it; anything else fails
+# closed to L0. R2 is always L0 — absence-of-evidence (zero mutating calls) is
+# structurally weaker than presence-of-deletion, so it never grades above
+# diagnostic.
+
+_ARTIFACT_RULE_RE = re.compile(r"rule=(R1|R2)")
+
+
+def _artifact_rule(evidence: list[str]) -> str | None:
+    """The sub-rule label from the EXACT ARL-authored evidence line (fullmatch on
+    the stripped line — same anti-forgery discipline as the retry count). None if
+    absent or ambiguous (two distinct labels) -> grading fails closed."""
+    labels = {
+        m.group(1)
+        for line in evidence
+        if (m := _ARTIFACT_RULE_RE.fullmatch(line.strip())) is not None
+    }
+    return next(iter(labels)) if len(labels) == 1 else None
+
+
+def _grade_artifact_failure(rx: PrescriptionRecord, raw_by_id: dict[str, StepRecord]) -> str:
+    """L1 only for a fact-corroborated R1; everything else L0 (fail closed)."""
+    rule = _artifact_rule(rx.evidence)
+    if rule != "R1":
+        return "L0"
+    step_ids = {
+        m.group(1)
+        for line in rx.evidence
+        if (m := _STEP_ID_RE.fullmatch(line.strip())) is not None
+    }
+    if len(step_ids) != 1:
+        return "L0"
+    step = raw_by_id.get(next(iter(step_ids)))
+    if step is None:
+        return "L0"
+    md = step.metadata
+    if (
+        md.get("deletes_test_path") is True
+        and md.get("completion_claim_follows") is True
+        and md.get("user_directed_deletion") is not True
+    ):
+        return "L1"
+    return "L0"
+
+
+def _artifact_failure_receipt(
+    bundle: TraceBundle, rx: PrescriptionRecord, raw_by_id: dict[str, StepRecord]
+) -> RepairReceipt:
+    rule = _artifact_rule(rx.evidence)
+    proof_level = _grade_artifact_failure(rx, raw_by_id)
+    return RepairReceipt(
+        run_id=bundle.run.id,
+        claim=_artifact_claim(rule, proof_level),
+        observed_failure="artifact_failure",
+        evidence=list(rx.evidence),
+        repair_artifact={
+            "patch_type": rx.patch_type,
+            # NOT a templated applyable patch: the artifact is a text fix
+            # direction (ARL stores no file content, so it cannot name the path).
+            "templated": False,
+            "one_line_fix": rx.one_line_fix,
+            "patch": rx.patch,
+        },
+        proof_level=proof_level,
+        confidence="low",
+        limits=_artifact_limits(rule),
+        next_evidence=_artifact_next_evidence(rule),
+        outcome_delta=_artifact_outcome_delta(rx.expected_impact),
+    )
+
+
+def _artifact_claim(rule: str | None, proof_level: str) -> str:
+    if rule == "R1" and proof_level == "L1":
+        return (
+            "The run's success claim diverges from its own session log: a "
+            "test-path deletion precedes the completion claim with no intervening "
+            "user instruction (relevance proven from the log; intent NOT proven)."
+        )
+    if rule == "R2":
+        return (
+            "The assistant claimed completion after a change request, but the "
+            "session log records zero mutating tool calls (diagnostic; the claim "
+            "is unverified, not proven false)."
+        )
+    return (
+        "ARL flagged a possible success-claim/log divergence, but the cited "
+        "step's capture-time facts could not be corroborated (diagnostic only)."
+    )
+
+
+def _artifact_limits(rule: str | None) -> list[str]:
+    limits = [
+        # The MANDATORY caveat: intent is not provable from the log alone.
+        "The deletion or omission may have been user-directed in a way the "
+        "detector could not see (an instruction outside this session, or "
+        "phrasing outside the bounded directive list); verify intent before "
+        "acting.",
+        "Completion claims are matched against a bounded marker list computed at "
+        "capture; phrasing outside the list is not detected, and a matched "
+        "marker proves wording, not intent.",
+        "ARL did not run the tests or inspect the working tree; whether the "
+        "delivered work is actually correct is not established at this level.",
+    ]
+    if rule == "R2":
+        limits.append(
+            "Zero mutating tool calls is evidence of absence in THIS session log "
+            "only — work may have landed outside it (another session, manual "
+            "edits, MCP side effects the log does not record)."
+        )
+        limits.append(
+            "The change request was inferred from a bounded verb list; the user "
+            "may have wanted analysis only."
+        )
+    return limits
+
+
+def _artifact_next_evidence(rule: str | None) -> list[str]:
+    if rule == "R1":
+        return [
+            "restore the deleted test path(s) from version control and re-run the "
+            "full suite",
+            "confirm with the operator whether the deletion was requested",
+        ]
+    return [
+        "diff the working tree / VCS log to verify whether any change actually "
+        "landed",
+        "re-run the task with the completion claim treated as unverified",
+    ]
+
+
+def _artifact_outcome_delta(expected_impact: dict[str, Any]) -> dict[str, Any]:
+    delta = dict(expected_impact)
+    delta.setdefault(
+        "guardrail_trust",
+        "treat in-session success claims as unverified until re-verified against "
+        "real command output; ARL advises, you verify.",
+    )
+    return delta
 
 
 def _grade_retry_cap(patch_type: str, patch: str, observed_retry_count: int | None) -> str:
