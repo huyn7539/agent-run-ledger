@@ -409,6 +409,7 @@ def provenanced_run_ids(db_path: Path) -> set[str]:
     whether a locally-applied CLAUDE.md rule was in effect when it ran)."""
     if not db_path.exists():
         return set()
+    init_db(db_path)  # pre-v2 file: add the column (DEFAULT 0) instead of crashing
     with connect(db_path) as conn:
         rows = conn.execute("SELECT id FROM runs WHERE adapter_provenanced = 1").fetchall()
     return {row["id"] for row in rows}

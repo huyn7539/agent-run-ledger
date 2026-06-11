@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from agent_run_ledger.cli import app
@@ -531,6 +532,47 @@ def test_pre_task61_experiment_rows_route_to_review(tmp_path: Path) -> None:
     assert review["action"] == "review"
     assert "guardrail baseline" in review["detail"]
     assert list_experiments(db, "review")
+
+
+def test_corrupt_experiment_row_routes_to_review_not_crash(tmp_path: Path) -> None:
+    """Fleet review (fail-closed lens): a row with a corrupt eps_harm string
+    (or k>n counts) must route to review, never crash the review loop and
+    strand the experiment in 'applied'."""
+    from agent_run_ledger.core.storage import save_experiment
+
+    db = tmp_path / "ledger.sqlite"
+    _seed_baseline(db)
+    row = _forged_experiment_row(7, "retry_loop_budget")
+    row["eps_harm"] = "not-a-fraction"
+    row["status"] = "applied"
+    save_experiment(db, row)
+    result = runner.invoke(app, ["review-applied", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    review = json.loads(result.output)["reviews"][0]
+    assert review["action"] == "review"
+    assert "fail-closed" in review["detail"]
+    assert list_experiments(db, "review")
+
+
+def test_mkstemp_failure_stays_in_blockerror_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fleet review: an OSError staging the temp file maps to BlockError —
+    callers catch BlockError, not raw OSError."""
+    import tempfile as _tempfile
+
+    from agent_run_ledger.core.claudemd import BlockError, apply_line
+
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# user\n", encoding="utf-8")
+
+    def _boom(*a, **k):
+        raise OSError("disk says no")
+
+    monkeypatch.setattr(_tempfile, "mkstemp", _boom)
+    with pytest.raises(BlockError, match="cannot stage"):
+        apply_line(target, tmp_path, "- ARL(retry_loop_budget/retry-budget/v1) tool=x: stop.")
+    assert target.read_text(encoding="utf-8") == "# user\n"
 
 
 def test_export_never_carries_experiment_snapshots(tmp_path: Path) -> None:

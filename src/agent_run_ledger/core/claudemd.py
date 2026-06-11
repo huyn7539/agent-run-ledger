@@ -141,7 +141,13 @@ def _atomic_write(path: Path, payload: bytes, preimage_hash: str | None) -> None
             raise BlockError("CLAUDE.md changed since it was read (CAS mismatch) — aborting")
     elif path.exists():
         raise BlockError("target appeared since it was read (create race) — aborting")
-    fd, tmp_name = tempfile.mkstemp(prefix=".arl-block-", dir=str(path.parent))
+    try:
+        fd, tmp_name = tempfile.mkstemp(prefix=".arl-block-", dir=str(path.parent))
+    except OSError as exc:
+        # parent vanished/unwritable mid-flight: stay in the BlockError contract
+        raise BlockError(
+            f"cannot stage a temp file next to the target ({exc}) — aborting"
+        ) from None
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(payload)

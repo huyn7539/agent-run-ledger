@@ -460,6 +460,9 @@ def apply_cmd(
                     "Bayesian decision rule with a fixed Beta(1,1) prior",
                     "cohorts = adapter-provenanced runs only (imported runs have "
                     "no knowable relationship to local CLAUDE.md state)",
+                    "guardrail residual: failures shifted between classes at a FLAT "
+                    "overall rate are not caught - the guardrail detects overall "
+                    "worsening, not class redistribution",
                 ],
             },
             indent=2,
@@ -530,22 +533,37 @@ def review_applied_cmd(
             and exp.pinned_utc_ts(r.started_at)
             and r.started_at > e["applied_at"]
         ]
-        n1, k1 = proposemod.tool_failure_counts(db, e["tool"], runs_after)
-        g_n1, g_k1 = proposemod.any_failure_counts(db, runs_after)
-        eps = Fraction(e["eps_harm"])
-        breached = exp.guardrail_breach(
-            e["guardrail_n0"], e["guardrail_k0"], g_n1, g_k1, eps_harm=eps
-        )
-        decision = exp.decide(
-            e["baseline_n"],
-            e["baseline_k"],
-            n1,
-            k1,
-            mde=Fraction(e["mde"]),
-            eps_harm=eps,
-            min_n=e["min_n"],
-            guardrail_breached=breached,
-        )
+        # Any failure to MEASURE routes the experiment to review and never
+        # crashes the loop (fleet review: corrupt mde/eps strings, k>n rows,
+        # or a vanished evidence run must land CLOSED, not as a stack trace
+        # that strands the row in "applied").
+        try:
+            n1, k1 = proposemod.tool_failure_counts(db, e["tool"], runs_after)
+            g_n1, g_k1 = proposemod.any_failure_counts(db, runs_after)
+            eps = Fraction(e["eps_harm"])
+            breached = exp.guardrail_breach(
+                e["guardrail_n0"], e["guardrail_k0"], g_n1, g_k1, eps_harm=eps
+            )
+            decision = exp.decide(
+                e["baseline_n"],
+                e["baseline_k"],
+                n1,
+                k1,
+                mde=Fraction(e["mde"]),
+                eps_harm=eps,
+                min_n=e["min_n"],
+                guardrail_breached=breached,
+            )
+        except (ValueError, ZeroDivisionError, KeyError) as exc:
+            set_experiment_status(db, e["experiment_id"], "review")
+            reviews.append(
+                {
+                    "experiment_id": e["experiment_id"],
+                    "action": "review",
+                    "detail": f"measurement failed fail-closed ({exc!r}); routed to review",
+                }
+            )
+            continue
         entry: dict = {
             "experiment_id": e["experiment_id"],
             "tool": e["tool"],
@@ -564,6 +582,9 @@ def review_applied_cmd(
                 "treatment cohort = adapter-provenanced runs whose started_at "
                 "matches the pinned UTC shape strictly after applied_at "
                 "(imported runs and other shapes excluded, fail-closed)",
+                "guardrail residual: failures shifted between classes at a FLAT "
+                "overall rate are not caught - the guardrail detects overall "
+                "worsening, not class redistribution",
             ],
         }
         entry.update(decision.display())
