@@ -14,8 +14,10 @@ design: ARL does not invent receipts where there is nothing to repair. "The run
 finished" and "the run is verified clean" are different claims; ARL exists to keep
 them different.)
 
-Everything runs on your machine. Prompt/output content never leaves it. There is no
-server, no telemetry, no network code in the package (enforced by tests).
+Everything runs on your machine. Prompt/output content never leaves it. There is
+no telemetry and no OUTBOUND network code in the package (enforced by AST tests
+— dynamic imports and outbound socket primitives are banned too). The optional
+`arl serve` dashboard binds 127.0.0.1 only; nothing leaves your machine.
 
 ## Install
 

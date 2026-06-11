@@ -278,6 +278,28 @@ def export_trace(
     console.print(f"wrote trace: {out}")
 
 
+@app.command("serve")
+def serve_cmd(
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    port: int = typer.Option(0, "--port", help="Port (default 0 = ephemeral, printed)."),
+) -> None:
+    """Read-only localhost dashboard over the ledger (binds 127.0.0.1 only)."""
+    from agent_run_ledger.core.serve import make_server
+
+    server = make_server(db, port=port)
+    bound = server.server_address[1]
+    # ASCII-only output (cp1252 console class): plain prints, no glyphs.
+    print(f"arl serve: http://127.0.0.1:{bound}/")
+    print("read-only dashboard; Ctrl-C to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+        print("arl serve: stopped")
+
+
 @app.command("report")
 def report(
     run: str = typer.Option(..., "--run", help="Run id."),

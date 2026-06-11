@@ -322,18 +322,19 @@ def save_bundle(db_path: Path, bundle: TraceBundle) -> str:
     return bundle.run.id
 
 
-def load_bundle(db_path: Path, run_id: str) -> TraceBundle:
-    init_db(db_path)
-    with connect(db_path) as conn:
-        run_row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
-        if run_row is None:
-            raise KeyError(f"run not found: {run_id}")
-        step_rows = conn.execute(
-            "SELECT * FROM steps WHERE run_id = ? ORDER BY started_at, id", (run_id,)
-        ).fetchall()
-        prescription_rows = conn.execute(
-            "SELECT * FROM prescriptions WHERE run_id = ? ORDER BY id", (run_id,)
-        ).fetchall()
+def _load_bundle_from(conn: sqlite3.Connection, run_id: str) -> TraceBundle:
+    """Map one run + its steps/prescriptions from an OPEN connection. Shared by
+    the writable loader and the strictly-read-only loader (Task 59) so the SQL
+    and row mapping cannot drift between them."""
+    run_row = conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if run_row is None:
+        raise KeyError(f"run not found: {run_id}")
+    step_rows = conn.execute(
+        "SELECT * FROM steps WHERE run_id = ? ORDER BY started_at, id", (run_id,)
+    ).fetchall()
+    prescription_rows = conn.execute(
+        "SELECT * FROM prescriptions WHERE run_id = ? ORDER BY id", (run_id,)
+    ).fetchall()
     run = _run_from_row(run_row)
     steps = [_step_from_row(row) for row in step_rows]
     prescriptions = [_prescription_from_row(row) for row in prescription_rows]
@@ -351,11 +352,64 @@ def load_bundle(db_path: Path, run_id: str) -> TraceBundle:
     return bundle
 
 
+def load_bundle(db_path: Path, run_id: str) -> TraceBundle:
+    init_db(db_path)
+    with connect(db_path) as conn:
+        return _load_bundle_from(conn, run_id)
+
+
 def list_runs(db_path: Path) -> list[RunRecord]:
     if not db_path.exists():
         return []
     with connect(db_path) as conn:
         rows = conn.execute("SELECT * FROM runs ORDER BY started_at DESC, id DESC").fetchall()
+    return [_run_from_row(row) for row in rows]
+
+
+def _sqlite_ro_uri(db_path: Path) -> str:
+    """A read-only SQLite URI for *db_path*. Hand-rolled minimal percent-encoding
+    (%, ?, #, space) because ``urllib`` is banned package-wide by the egress
+    guard; SQLite decodes %HH in URI filenames."""
+    p = db_path.resolve().as_posix()
+    for ch, enc in (("%", "%25"), ("?", "%3F"), ("#", "%23"), (" ", "%20")):
+        p = p.replace(ch, enc)
+    if not p.startswith("/"):
+        p = "/" + p  # Windows drive paths: file:///C:/...
+    return f"file://{p}?mode=ro"
+
+
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    """A STRICTLY read-only connection for read surfaces (``arl serve``, Task 59).
+
+    URI ``mode=ro`` + ``PRAGMA query_only=ON``; never mkdirs, never migrates,
+    never chmods — a GET must not write (Codex spec-review F8: ``load_bundle``'s
+    ``init_db`` runs DDL + chmod on read; serve must never take that path).
+    Raises ``sqlite3.OperationalError`` when the file does not exist — the
+    caller maps that to a 404/empty surface; nothing is auto-created."""
+    conn = sqlite3.connect(_sqlite_ro_uri(db_path), uri=True, timeout=2.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
+def load_bundle_readonly(db_path: Path, run_id: str) -> TraceBundle:
+    """Read-only ``load_bundle`` (per-request, short-lived — closes the handle)."""
+    conn = connect_readonly(db_path)
+    try:
+        return _load_bundle_from(conn, run_id)
+    finally:
+        conn.close()
+
+
+def list_runs_readonly(db_path: Path) -> list[RunRecord]:
+    """Read-only ``list_runs`` (per-request, short-lived — closes the handle)."""
+    if not db_path.exists():
+        return []
+    conn = connect_readonly(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM runs ORDER BY started_at DESC, id DESC").fetchall()
+    finally:
+        conn.close()
     return [_run_from_row(row) for row in rows]
 
 
