@@ -151,7 +151,10 @@ def test_error_does_not_leak_prompt(tmp_path: Path) -> None:
 
     run_id = save_bundle(db, bundle)
     loaded = load_bundle(db, run_id)
-    write_trace(loaded, out)
+    # raw_local: the leak matrix must hold even on the FULL-FIDELITY local form
+    # (prompt content is never under allowed keys); the default share-form
+    # export additionally drops raw-content values (Task 46, test_export_scrub).
+    write_trace(loaded, out, raw_local=True)
     leak_channels = _leak_channels(db, out, loaded, sentinels)
 
     assert leak_channels == [], leak_channels

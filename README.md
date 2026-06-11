@@ -265,7 +265,10 @@ applied (the success metric). Open a GitHub issue at
 
 Do NOT paste your raw session `.jsonl` files — they contain your actual
 prompts and tool output. If a session is needed to reproduce a parser bug,
-`arl export --run <id> --out trace.json` produces the content-free neutral form.
+`arl export --run <id> --out trace.json` produces the content-free neutral form
+(the default export scrubs raw-content metadata values and patch bodies at the
+share boundary; `--raw-local` keeps full fidelity for local use only — do not
+paste that form).
 
 ## Private Alpha Definition
 

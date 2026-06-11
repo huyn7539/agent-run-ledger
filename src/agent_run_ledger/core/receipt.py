@@ -27,10 +27,11 @@ prescription. Those fields introduce NO new egress channel content.
 ONE field is NOT content-free: ``repair_artifact.patch`` (and the app-supplied
 allowed-metadata ``before`` / ``path`` / ``after`` values it is built from) MAY
 carry local file paths and source-line content — the unified_diff embeds the real
-``before`` line and the repo-relative ``path``. So a receipt is safe to surface
-locally, but ``repair_artifact.patch`` is NOT remote-egress-safe until the Task 46
-allowed-metadata value scrub redacts those before/path/after values. Treat the
-patch as local-only output, not a bounded label, when forwarding off-box.
+``before`` line and the repo-relative ``path``. The patch is LOCAL-ONLY output.
+Task 46 (landed 2026-06-11) enforces this at the egress chokepoint: the default
+``arl export`` scrubs raw-content metadata values and patch bodies
+(``core.io._scrub_for_share``); full fidelity requires the explicit
+``--raw-local`` opt-in, which is documented do-not-share.
 """
 
 from __future__ import annotations

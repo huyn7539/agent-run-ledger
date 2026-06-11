@@ -60,7 +60,9 @@ def test_unicode_preserved(tmp_path: Path) -> None:
     out = tmp_path / "unicode-out.json"
     path.write_text(json.dumps(data), encoding="utf-8")
 
-    write_trace(load_trace(path), out)
+    # raw_local: this test pins LOCAL full-fidelity unicode round-trip; the
+    # default (share-form) export drops raw-content values (Task 46).
+    write_trace(load_trace(path), out, raw_local=True)
 
     assert "\\ud83d\\ude00" in out.read_text(encoding="utf-8")
     metadata = load_trace(out).steps[0].metadata

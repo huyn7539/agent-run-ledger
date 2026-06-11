@@ -262,10 +262,19 @@ def export_trace(
     run: str = typer.Option(..., "--run", help="Run id."),
     out: Path = typer.Option(..., "--out", help="Output JSON path."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    raw_local: bool = typer.Option(
+        False,
+        "--raw-local",
+        help=(
+            "Keep raw-content metadata values and patch bodies (full-fidelity "
+            "LOCAL form - do not share). Default export is the share-safe "
+            "scrubbed form (Task 46)."
+        ),
+    ),
 ) -> None:
-    """Export a recorded run back to a neutral trace JSON file (local; raw facts)."""
+    """Export a recorded run to neutral trace JSON (share-safe scrubbed by default)."""
     bundle = _load_bundle_or_exit(db, run)
-    _friendly_or_exit(lambda: write_trace(bundle, out))
+    _friendly_or_exit(lambda: write_trace(bundle, out, raw_local=raw_local))
     console.print(f"wrote trace: {out}")
 
 
