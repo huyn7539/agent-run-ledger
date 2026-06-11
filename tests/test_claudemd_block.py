@@ -84,6 +84,41 @@ def test_mixed_newline_styles_fail_closed(tmp_path: Path) -> None:
     assert target.read_bytes() == before
 
 
+def test_atomic_write_refuses_when_read_target_vanished(tmp_path: Path) -> None:
+    """Codex T61 review: a file that existed at read time but vanished before
+    the write must fail the CAS path — never be silently reclassified as a
+    create (which would resurrect deleted content)."""
+    from agent_run_ledger.core.claudemd import _atomic_write, block_hash
+
+    target = tmp_path / "CLAUDE.md"
+    with pytest.raises(BlockError, match="vanished"):
+        _atomic_write(target, b"payload", block_hash("what we read earlier"))
+    assert not target.exists()
+
+
+def test_atomic_write_create_publish_is_no_clobber(tmp_path: Path) -> None:
+    """The create publish uses an atomic no-clobber primitive: even bypassing
+    the early exists() check (simulating the TOCTOU window), an existing
+    target survives byte-identical and the write fails closed."""
+    import tempfile
+
+    from agent_run_ledger.core.claudemd import _atomic_write
+
+    target = tmp_path / "CLAUDE.md"
+    fd, tmp_name = tempfile.mkstemp(dir=str(tmp_path))
+    os.close(fd)
+    Path(tmp_name).write_bytes(b"new content")
+    target.write_bytes(b"appeared in the race window")
+    with pytest.raises(FileExistsError):
+        os.link(tmp_name, target)  # the primitive itself refuses — window closed
+    assert target.read_bytes() == b"appeared in the race window"
+    os.unlink(tmp_name)
+    # and end-to-end through _atomic_write with the target present:
+    with pytest.raises(BlockError, match="create race"):
+        _atomic_write(target, b"payload", None)
+    assert target.read_bytes() == b"appeared in the race window"
+
+
 def test_atomic_write_refuses_when_target_appeared_since_read(tmp_path: Path) -> None:
     """Task 61 (Codex P2 MISSING item — create race): preimage None means the
     caller read NO file, so a file that exists at write time must never be

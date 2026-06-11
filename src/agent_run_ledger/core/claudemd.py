@@ -124,11 +124,19 @@ def _atomic_write(path: Path, payload: bytes, preimage_hash: str | None) -> None
     A concurrent edit between our read and the replace aborts with BlockError
     (the caller reports propose-only/review; nothing was written).
 
-    ``preimage_hash=None`` means the caller read NO file — so a file that has
-    appeared since is a create race and must not be clobbered (Task 61, from
-    the Codex P2 MISSING-test list)."""
+    ``preimage_hash=None`` means the caller read NO file — the create is
+    published with an atomic NO-CLOBBER primitive (``os.link`` refuses an
+    existing target), so even a file that appears between the early check and
+    the publish cannot be clobbered (Codex T61 review: check-then-replace was
+    still TOCTOU). A file that VANISHES after being read fails the CAS read
+    and aborts — never silently reclassified as a create."""
     if preimage_hash is not None:
-        current = _sha256(path.read_bytes())
+        try:
+            current = _sha256(path.read_bytes())
+        except FileNotFoundError:
+            raise BlockError(
+                "target vanished since it was read (CAS mismatch) — aborting"
+            ) from None
         if current != preimage_hash:
             raise BlockError("CLAUDE.md changed since it was read (CAS mismatch) — aborting")
     elif path.exists():
@@ -139,7 +147,22 @@ def _atomic_write(path: Path, payload: bytes, preimage_hash: str | None) -> None
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp_name, path)
+        if preimage_hash is None:
+            try:
+                os.link(tmp_name, path)
+            except FileExistsError:
+                raise BlockError(
+                    "target appeared since it was read (create race) — aborting"
+                ) from None
+            except OSError as exc:
+                # filesystem without hard links: fail closed, never clobber
+                raise BlockError(
+                    f"atomic no-clobber create unsupported here ({exc}); "
+                    "create the file manually, then re-run apply"
+                ) from None
+            os.unlink(tmp_name)
+        else:
+            os.replace(tmp_name, path)
     except BaseException:
         try:
             os.unlink(tmp_name)
@@ -155,7 +178,11 @@ def apply_line(path: Path, root: Path, line: str, *, create: bool = False) -> Ap
     _validate_line(line)
     _check_target(path, root, must_exist=not create)
 
-    if not path.exists():
+    # capture existence ONCE at read time (Codex T61 review: recomputing
+    # exists() at the write call site let a file deleted mid-call be
+    # misclassified as a create and skip the CAS path)
+    existed = path.exists()
+    if not existed:
         raw = b""
         text = ""
     else:
@@ -181,7 +208,7 @@ def apply_line(path: Path, root: Path, line: str, *, create: bool = False) -> Ap
         out_lines = [*head, BEGIN_MARKER, *new_inner, END_MARKER, *tail]
     payload = eol.join(out_lines).encode("utf-8")
 
-    _atomic_write(path, payload, before_hash if path.exists() else None)
+    _atomic_write(path, payload, before_hash if existed else None)
     return ApplyResult(
         True, before_hash, _sha256(payload), before_block, "\n".join(new_inner)
     )
