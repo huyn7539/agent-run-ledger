@@ -115,6 +115,31 @@ def test_cost_on_read_unknown_model_falls_back_to_cache() -> None:
     assert cost_on_read(bundle) == 0.0
 
 
+def test_cost_on_read_mixed_attribution_prices_run_totals() -> None:
+    """Task 53 F1: SOME steps carry tokens but strictly fewer than the run
+    totals — pricing only the attributed fraction silently discards the run
+    remainder (Codex probe: 500 of 1000 attributed -> priced at half). Under-
+    attribution prices the RUN totals instead."""
+    bundle = TraceBundle(
+        run=_run(total_input_tokens=1000, total_output_tokens=1000),
+        steps=[_step(id="s1", input_tokens=500), _step(id="s2")],
+    )
+    # run-level: 1000 @ 0.00015/1k + 1000 @ 0.0006/1k — NOT 500 @ 0.00015/1k
+    assert cost_on_read(bundle) == pytest.approx(0.00075)
+
+
+def test_cost_on_read_full_attribution_keeps_per_step_pricing() -> None:
+    """Regression pin: full attribution (step sums cover the run totals) keeps
+    per-step pricing so the cached-input discount is NOT lost to a run-level
+    flattening (run totals carry no cached/reasoning breakdown)."""
+    bundle = TraceBundle(
+        run=_run(total_input_tokens=1000, total_output_tokens=0),
+        steps=[_step(input_tokens=1000, cached_input_tokens=1000)],
+    )
+    # all 1000 input tokens cached -> cached rate only (0.000075/1k)
+    assert cost_on_read(bundle) == pytest.approx(0.000075)
+
+
 # --- persistence of the new fact fields ---------------------------------------
 
 def test_cost_facts_survive_db_roundtrip(tmp_path: Path) -> None:

@@ -39,7 +39,14 @@ def _unified_cap_diff(before_val: int, after_val: int) -> str:
 def _bundle_with_prescription(*, observed_retry_count: int, before_val: int, after_val: int) -> TraceBundle:
     """A bundle carrying ONE retry-cap prescription whose evidence cites
     *observed_retry_count* and whose unified diff lowers the cap from *before_val*
-    to *after_val*. Models a stored/imported prescription hitting the verifier."""
+    to *after_val*. Models a stored/imported prescription hitting the verifier.
+
+    Task 53 F3 update: the observed loop is built from RAW attempts that ARL's
+    on-read collapse counts itself — only a DERIVED retry_count supports an L2
+    sufficiency claim now (an explicit single-step count caps at L1, see
+    test_retry_count_provenance.py) — so these tests keep exercising the
+    cap-vs-count sufficiency distinctions on the trusted lane. The collapse
+    keeps the FIRST attempt's id, so evidence still cites ``step_id=fn_attempt1``."""
     run = RunRecord(
         id="run_verifier_boundary",
         workflow="retry-loop-agent",
@@ -51,19 +58,25 @@ def _bundle_with_prescription(*, observed_retry_count: int, before_val: int, aft
         success_label="failed",
         total_cost_usd=0.03,
     )
-    step = StepRecord(
-        id="fn_attempt1",
-        run_id=run.id,
-        step_type="function",
-        name="crm.lookup",
-        started_at="2026-05-31T10:00:00Z",
-        ended_at="2026-05-31T10:00:06Z",
-        span_kind="function",
-        retry_count=observed_retry_count,
-        cost_usd=0.03,
-        error="Error running tool",
-        error_class="Other",
-    )
+    attempts = observed_retry_count + 1
+    steps = [
+        StepRecord(
+            id=f"fn_attempt{i}",
+            run_id=run.id,
+            step_type="function",
+            name="crm.lookup",
+            started_at=f"2026-05-31T10:00:{i:02d}Z",
+            ended_at=f"2026-05-31T10:00:{i:02d}Z",
+            parent_step_id=f"turn_{i}",
+            span_kind="function",
+            retry_scope="agent_root",
+            input_fingerprint="fp_lookup_42",
+            cost_usd=(0.03 if i == 1 else 0.0),
+            error="Error running tool",
+            error_class="Other",
+        )
+        for i in range(1, attempts + 1)
+    ]
     rx = PrescriptionRecord(
         id="rx_imported_0001",
         run_id=run.id,
@@ -82,7 +95,7 @@ def _bundle_with_prescription(*, observed_retry_count: int, before_val: int, aft
         expected_impact={"estimated_cost_delta_usd": -0.02},
         regression_test_template="def test_crm_lookup_retry_budget():\n    assert True\n",
     )
-    return TraceBundle(run=run, steps=[step], prescriptions=[rx])
+    return TraceBundle(run=run, steps=steps, prescriptions=[rx])
 
 
 def test_lowered_but_insufficient_cap_is_not_graded_l2() -> None:

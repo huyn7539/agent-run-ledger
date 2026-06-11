@@ -110,8 +110,17 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
         # count must be the CITED STEP's REAL retry_count (looked up in the derived
         # facts), NOT the number the evidence string claims — else forged evidence
         # (retry_count=99 over a real 2) upgrades an insufficient cap to L2 (Task 51).
-        observed = _authoritative_observed_count(rx, derived_by_id)
+        observed, count_derived = _authoritative_observed_count(rx, derived_by_id)
         proof_level = _grade_retry_cap(rx.patch_type, rx.patch, observed)
+        # Task 53 F3: an EXPLICIT (app/import-supplied) retry_count is an
+        # assertion, not an ARL-derived fact — L2's sufficiency claim is only
+        # honest against attempts ARL itself counted by collapsing raw spans.
+        # A forged import stamping retry_count=99 + matching evidence + a valid
+        # cap diff must not earn an L2 accusation-grade receipt. Cap at L1
+        # (relevance may stand); the cap is disclosed in limits.
+        explicit_count = observed is not None and not count_derived
+        if proof_level == "L2" and explicit_count:
+            proof_level = "L1"
         model_supplied = _model_priced_run(bundle)
         receipts.append(
             RepairReceipt(
@@ -130,7 +139,7 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
                 },
                 proof_level=proof_level,
                 confidence=_confidence(proof_level),
-                limits=_limits(proof_level, model_supplied),
+                limits=_limits(proof_level, model_supplied, explicit_count),
                 next_evidence=_next_evidence(proof_level),
                 outcome_delta=_outcome_delta(rx.expected_impact),
             )
@@ -366,12 +375,15 @@ _NON_CODE_EXTENSIONS = (".md", ".rst", ".txt", ".markdown", ".adoc")
 
 def _authoritative_observed_count(
     rx: PrescriptionRecord, derived_by_id: dict[str, StepRecord]
-) -> int | None:
+) -> tuple[int | None, bool]:
     """The observed additional-attempt count to grade against — recovered from the
-    CITED STEP's REAL ``retry_count`` in the derived facts, NOT the evidence string.
+    CITED STEP's REAL ``retry_count`` in the derived facts, NOT the evidence string —
+    plus whether that count was DERIVED by ARL's own collapse (Task 53 F3): only a
+    derived count can support an L2 sufficiency claim; an explicit (app/import-
+    supplied) count is an assertion and caps at L1 upstream.
 
-    Fail closed (return None -> L1) when sufficiency is unverifiable or evidence looks
-    FORGED (Task 51):
+    Fail closed (return (None, False) -> no L2) when sufficiency is unverifiable or
+    evidence looks FORGED (Task 51):
       * no ``step_id=`` in evidence, or the cited step is not in the derived facts;
       * the evidence's CLAIMED count (if present) DISAGREES with the cited step's real
         count — a stored/imported prescription claiming ``retry_count=99`` over a real
@@ -380,17 +392,17 @@ def _authoritative_observed_count(
         m.group(1) for line in rx.evidence if (m := _STEP_ID_RE.fullmatch(line.strip())) is not None
     }
     if len(step_ids) != 1:
-        return None
+        return None, False
     step = derived_by_id.get(next(iter(step_ids)))
     if step is None:
-        return None
+        return None, False
     real = step.retry_count
     claimed = _observed_retry_count(rx.evidence)
     # If evidence claims a count, it must MATCH the real cited-step count; a mismatch
     # (especially a larger forged claim) fails closed. Absent claim -> trust the fact.
     if claimed is not None and claimed != real:
-        return None
-    return real
+        return None, False
+    return real, step.retry_count_source == "derived"
 
 
 def _new_cap_value(patch: str) -> int | None:
@@ -537,7 +549,7 @@ def _confidence(proof_level: str) -> str:
     return {"L2": "medium", "L1": "low", "L0": "low"}.get(proof_level, "low")
 
 
-def _limits(proof_level: str, model_supplied: bool) -> list[str]:
+def _limits(proof_level: str, model_supplied: bool, explicit_count: bool = False) -> list[str]:
     limits = [
         # Constraint 5: regression-to-the-mean disclosure.
         "Before/after deltas are uncorrected for regression to the mean — ARL "
@@ -559,6 +571,12 @@ def _limits(proof_level: str, model_supplied: bool) -> list[str]:
         limits.append(
             "The cost figure depends on the run's model identity, which some "
             "adapters obtain from an app-supplied hint when the trace omits it."
+        )
+    if explicit_count:
+        limits.append(
+            "The observed retry count is app-supplied (explicit), not derived by "
+            "ARL from raw attempts in this trace — mechanical-sufficiency grading "
+            "is capped at L1 (Task 53)."
         )
     if proof_level != "L2":
         limits.append(

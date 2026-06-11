@@ -417,6 +417,13 @@ class StepRecord:
     provider_reported_cost_usd: float | None = None
     cost_usd: float = 0.0
     retry_count: int = 0
+    # Task 53 F3 — JUDGMENT-VIEW provenance of retry_count: "derived" ONLY when
+    # ARL's own on-read collapse counted raw attempts (prescriptions.
+    # _collapse_steps); anything app-supplied/imported stays "explicit" — the
+    # fail-closed default. NEVER serialized: to_dict does not write it and
+    # from_dict does not read it, so an imported file cannot claim a derived
+    # count (same in-process-trust pattern as TraceBundle.adapter_provenanced).
+    retry_count_source: str = "explicit"
     error: str | None = None
     # L8: typed, bounded error LABEL (e.g. "Timeout"). Derived from the error
     # CLASS at the chokepoint; the raw message is dropped, so this never leaks

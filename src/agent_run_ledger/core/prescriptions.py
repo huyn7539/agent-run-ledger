@@ -78,6 +78,9 @@ def _collapse_steps(group: list[StepRecord]) -> StepRecord:
         first,
         ended_at=last.ended_at,
         retry_count=len(group) - 1,
+        # Task 53 F3: this count was DERIVED by ARL from raw attempts — the only
+        # path that may mark it so; explicit pass-throughs keep the default.
+        retry_count_source="derived",
         input_tokens=sum(s.input_tokens for s in group),
         output_tokens=sum(s.output_tokens for s in group),
         cached_input_tokens=sum(s.cached_input_tokens for s in group),

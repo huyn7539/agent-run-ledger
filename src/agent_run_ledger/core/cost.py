@@ -12,10 +12,15 @@ minimal, versioned STUB — enough to make the seam real and the smoke test
 meaningful. A full multi-model / multi-region pricing table is the cost PRODUCT,
 which is post-gate. Do NOT grow this into a pricing engine here.
 
-Precedence for a run's cost:
+Precedence for a run's cost (made explicit in Task 53 F1):
   1. The sum of per-step ``provider_reported_cost_usd`` when ANY step reports it
      (the FACT — what the provider said it charged).
-  2. Else a compute from token facts x the stubbed price table for the model.
+  2. Else a compute from token facts x the stubbed price table for the model:
+     per-step sums when attribution is COMPLETE (step token sums cover the run
+     totals — preserves cached-input discounts and reasoning billing); the RUN
+     totals when per-step attribution is missing OR partial (steps account for
+     strictly fewer tokens than the run totals — pricing only the attributed
+     fraction would silently underprice the run).
   3. Else the cached ``total_cost_usd`` on the run (last-resort fallback, e.g.
      an unknown model).
 """
@@ -49,23 +54,28 @@ def _compute_from_tokens(bundle: TraceBundle) -> float | None:
         return None
     in_per_1k, out_per_1k, cached_per_1k = price
     total = 0.0
-    step_tokens = 0
     for s in bundle.steps:
-        step_tokens += s.input_tokens + s.output_tokens + s.cached_input_tokens + s.reasoning_tokens
         billable_input = max(0, s.input_tokens - s.cached_input_tokens)
         total += (billable_input / 1000.0) * in_per_1k
         total += (s.cached_input_tokens / 1000.0) * cached_per_1k
         # reasoning tokens are billed at the output rate by current providers.
         total += ((s.output_tokens + s.reasoning_tokens) / 1000.0) * out_per_1k
-    # Run-level-only token fallback (provider-neutral; keyed on the FACT pattern, not
-    # any adapter): some providers carry only a cumulative RUN token total with no
-    # per-call breakdown, so every step's token fields are 0.
-    # Pricing per-step then yields a misleading $0 on a real run. When the steps carry
-    # NO tokens but the run does, price the run totals instead — the tokens are real
-    # facts; only their per-call attribution is unavailable.
-    if step_tokens == 0 and (bundle.run.total_input_tokens or bundle.run.total_output_tokens):
-        run_in = max(0, bundle.run.total_input_tokens)
-        run_out = max(0, bundle.run.total_output_tokens)
+    # Run-level token fallback (provider-neutral; keyed on the FACT pattern, not any
+    # adapter). Price from the RUN totals instead of the per-step sum whenever the
+    # per-step attribution is INCOMPLETE relative to the run totals (Task 53 F1):
+    #   * NO step carries tokens but the run does (cumulative-total-only providers) —
+    #     the original case; pricing per-step yields a misleading $0;
+    #   * SOME steps carry tokens but strictly fewer than the run totals (a future
+    #     mixed-attribution adapter) — pricing only the attributed fraction silently
+    #     discards the run remainder and underprices the run.
+    # Run totals carry no cached/reasoning breakdown, so this prices at the flat
+    # input/output rates. FULL attribution (step sums cover the run totals) keeps
+    # per-step pricing so the cached-input discount and reasoning billing survive.
+    attributed_in = sum(s.input_tokens for s in bundle.steps)
+    attributed_out = sum(s.output_tokens for s in bundle.steps)
+    run_in = max(0, bundle.run.total_input_tokens)
+    run_out = max(0, bundle.run.total_output_tokens)
+    if (run_in or run_out) and (attributed_in < run_in or attributed_out < run_out):
         return round((run_in / 1000.0) * in_per_1k + (run_out / 1000.0) * out_per_1k, 8)
     return round(total, 8)
 
