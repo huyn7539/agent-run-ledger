@@ -88,18 +88,23 @@ def _split_block(text: str) -> tuple[list[str], list[str], list[str], str, bool]
     """Return (head_lines, inner_lines, tail_lines, eol, had_block) for exactly
     0/1 block. Lines are NORMALIZED (no trailing \\r); reassembly joins with the
     detected eol, so the file's newline style is preserved without doubling.
+    A file mixing newline styles is refused outright — one detected eol cannot
+    reassemble it byte-identically, and byte-preservation outranks convenience.
 
-    Marker lines must be EXACT (stripped equality). Any OTHER line containing
-    marker text anywhere in the file is ambiguity -> BlockError."""
+    Marker lines must be BYTE-EXACT (an indented or padded marker is ambiguity,
+    not a marker). Any OTHER line containing marker text is ambiguity too."""
+    if "\r" in text and (
+        text.count("\r\n") != text.count("\n") or text.count("\r") != text.count("\r\n")
+    ):
+        raise BlockError("mixed newline styles — byte-preserve cannot hold; fail closed")
     eol = "\r\n" if "\r\n" in text else "\n"
     lines = [ln.rstrip("\r") for ln in text.split("\n")]
-    begins = [i for i, ln in enumerate(lines) if ln.strip() == BEGIN_MARKER]
-    ends = [i for i, ln in enumerate(lines) if ln.strip() == END_MARKER]
+    begins = [i for i, ln in enumerate(lines) if ln == BEGIN_MARKER]
+    ends = [i for i, ln in enumerate(lines) if ln == END_MARKER]
     strays = [
         i
         for i, ln in enumerate(lines)
-        if ("ARL:BEGIN" in ln or "ARL:END" in ln)
-        and ln.strip() not in (BEGIN_MARKER, END_MARKER)
+        if ("ARL:BEGIN" in ln or "ARL:END" in ln) and ln not in (BEGIN_MARKER, END_MARKER)
     ]
     if strays:
         raise BlockError(f"marker text outside exact marker lines (lines {strays})")
@@ -187,7 +192,12 @@ def revert_block(
 ) -> RevertResult:
     """CAS revert: ONLY when the current inner block matches the recorded
     after-state, restore the recorded before-state. Anything else (hand edits,
-    a second tool's changes) -> "review", and NOTHING is written."""
+    a second tool's changes) -> "review", and NOTHING is written.
+
+    The recorded before-state is NOT trusted (Codex P2 review, CRITICAL): a
+    crafted registry row must never become bytes in CLAUDE.md. Every restored
+    line passes the same managed-line contract as an applied line, or the
+    revert routes to "review" with nothing written."""
     _check_target(path, root, must_exist=True)
     raw = path.read_bytes()
     text = raw.decode("utf-8")
@@ -202,6 +212,15 @@ def revert_block(
             "not reverting (review the stored before/after manually)",
         )
     restored = before_block.split("\n") if before_block else []
+    for ln in restored:
+        try:
+            _validate_line(ln)
+        except BlockError as exc:
+            return RevertResult(
+                "review",
+                f"recorded before-state violates the managed-line contract ({exc}); "
+                "refusing to write it (review the stored before/after manually)",
+            )
     if restored:
         out_lines = [*head, BEGIN_MARKER, *restored, END_MARKER, *tail]
     else:

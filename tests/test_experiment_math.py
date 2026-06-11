@@ -110,6 +110,17 @@ def test_ci95_is_display_only_floats() -> None:
     assert isinstance(lo, float) and isinstance(hi, float) and lo < hi
 
 
+def test_pinned_utc_ts_accepts_only_the_ledger_shape() -> None:
+    from agent_run_ledger.core.experiment import pinned_utc_ts
+
+    assert pinned_utc_ts("2026-06-11T01:02:03Z")
+    assert not pinned_utc_ts("2026-06-11T01:02:03+00:00")  # offset form
+    assert not pinned_utc_ts("2026-06-11T01:02:03.123Z")  # sub-second form
+    assert not pinned_utc_ts("2026-06-11T01:02:03Z\n")  # trailing newline
+    assert not pinned_utc_ts("")
+    assert not pinned_utc_ts("garbage")
+
+
 # --- P4: autonomy earned, never granted -------------------------------------------
 
 def test_auto_not_earned_with_no_history() -> None:

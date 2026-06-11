@@ -17,6 +17,7 @@ from the ledger, and apply re-verifies it before mutating anything).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,7 +30,12 @@ TEMPLATE_VERSION = "retry-budget/v1"
 PROPOSAL_CLASS = "retry_loop_budget"  # the ONE class this lane ships (wedge discipline)
 MIN_RECEIPTS = 3  # N>=3 same-shape receipts before proposing (abstain below)
 
-_SLOT_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+# Mixed case is DELIBERATE (Codex P2 review F9 rejected with justification):
+# the real tool namespace is capitalized (Bash, Read, WebFetch) — a lowercase-
+# only slot would abstain on every genuine Claude Code tool, and uppercase
+# ASCII letters add zero injection surface to this charset. Matched with
+# fullmatch (never match): `$` would let a trailing newline ride through.
+_SLOT_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _STEP_ID_RE = re.compile(r"^step_id=(\S+)$")
 
 
@@ -65,8 +71,13 @@ def _template_line(tool: str) -> str:
 
 
 def proposal_id_for(tool: str, line: str, run_ids: tuple[str, ...]) -> str:
-    preimage = "\x00".join(
-        [PROPOSAL_DOMAIN, TEMPLATE_VERSION, PROPOSAL_CLASS, tool, line, *sorted(run_ids)]
+    # Canonical JSON preimage — unambiguous field boundaries even when a
+    # crafted run id contains the old NUL delimiter (Codex P2 review F8:
+    # join-based preimages collide across different evidence splits).
+    preimage = json.dumps(
+        [PROPOSAL_DOMAIN, TEMPLATE_VERSION, PROPOSAL_CLASS, tool, line, sorted(run_ids)],
+        separators=(",", ":"),
+        ensure_ascii=True,
     )
     return "sha256:" + hashlib.sha256(preimage.encode("utf-8")).hexdigest()
 
@@ -99,7 +110,7 @@ def mine_proposals(
             if step is None:
                 continue
             tool = step.name
-            if not _SLOT_RE.match(tool):
+            if not _SLOT_RE.fullmatch(tool):
                 marker = tool[:80]
                 if marker not in seen_bad:
                     seen_bad.add(marker)

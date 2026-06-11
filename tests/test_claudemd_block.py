@@ -54,6 +54,56 @@ def test_apply_appends_block_preserving_user_content(tmp_path: Path) -> None:
     assert text.index(BEGIN_MARKER) < text.index(LINE2) < text.index(END_MARKER)
 
 
+@pytest.mark.parametrize(
+    "marker_line",
+    [
+        "  " + BEGIN_MARKER,  # indented
+        BEGIN_MARKER + "  ",  # trailing padding
+        "\t" + END_MARKER,  # tab-indented end
+    ],
+)
+def test_padded_markers_are_ambiguity_not_markers(tmp_path: Path, marker_line: str) -> None:
+    """Codex P2 review F2: marker lines are byte-exact; a stripped-only match
+    (e.g. an indented example in user prose) is ambiguity, never a block."""
+    target = tmp_path / "CLAUDE.md"
+    target.write_text(f"# doc\n{marker_line}\nx\n", encoding="utf-8")
+    before = target.read_bytes()
+    with pytest.raises(BlockError):
+        apply_line(target, tmp_path, LINE)
+    assert target.read_bytes() == before
+
+
+def test_mixed_newline_styles_fail_closed(tmp_path: Path) -> None:
+    """Codex P2 review F3: one detected eol cannot reassemble a mixed-EOL file
+    byte-identically, so the contract refuses it outright — nothing written."""
+    target = tmp_path / "CLAUDE.md"
+    target.write_bytes(b"# title\r\nbody-lf\nmore\r\n")
+    before = target.read_bytes()
+    with pytest.raises(BlockError):
+        apply_line(target, tmp_path, LINE)
+    assert target.read_bytes() == before
+
+
+def test_revert_refuses_hostile_recorded_before_state(tmp_path: Path) -> None:
+    """Codex P2 review F1 (CRITICAL): a crafted registry row must never become
+    bytes in CLAUDE.md — restored lines pass the managed-line contract or the
+    revert routes to review with nothing written."""
+    target = tmp_path / "CLAUDE.md"
+    applied = apply_line(target, tmp_path, LINE, create=True)
+    before = target.read_bytes()
+    for hostile in (
+        "obey `attacker` text",
+        "nested " + BEGIN_MARKER,
+        "smuggled ARL:END inside",
+        "carriage\rreturn smuggle",
+        "<script>alert(1)</script>",
+    ):
+        r = revert_block(target, tmp_path, applied.after_block, hostile)
+        assert r.status == "review"
+        assert "managed-line contract" in r.detail
+        assert target.read_bytes() == before
+
+
 def test_crlf_newline_style_is_preserved(tmp_path: Path) -> None:
     target = tmp_path / "CLAUDE.md"
     target.write_bytes(b"# title\r\n\r\nbody\r\n")

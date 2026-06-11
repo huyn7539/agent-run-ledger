@@ -31,11 +31,23 @@ fail-closed (documented here so nobody mistakes it for the offset tail).
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from fractions import Fraction
 from math import comb, sqrt
 
 ASSIGNMENT_DOMAIN = "arl-task60-assignment/v1"
+
+# The ledger's pinned second-resolution UTC shape (models.utc_now_iso). For
+# strings of EXACTLY this shape, lexicographic order == chronological order;
+# anything else (imported/crafted timestamps, other offsets, sub-second forms)
+# is excluded from cohort formation, fail-closed (Codex P2 review F7).
+_PINNED_UTC_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+
+
+def pinned_utc_ts(value: str) -> bool:
+    """True iff *value* is the pinned ``YYYY-MM-DDTHH:MM:SSZ`` UTC shape."""
+    return isinstance(value, str) and bool(_PINNED_UTC_RE.fullmatch(value))
 
 KEEP_CONFIDENCE = Fraction(95, 100)
 REVERT_CONFIDENCE = Fraction(70, 100)

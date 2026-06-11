@@ -347,9 +347,32 @@ def apply_cmd(
     if p is None:
         print("proposal not found in this ledger (run `arl propose`; ids re-derive from facts)")
         raise typer.Exit(2)
+    # Registry check BEFORE any mutation (Codex P2 review F4): the registry is
+    # first-write-wins, so a second apply of the same experiment would mutate
+    # CLAUDE.md without a tracking row — refuse up front, write nothing.
+    experiment_id = "exp-" + p.proposal_id.removeprefix("sha256:")[:16]
+    existing = [e for e in list_experiments(db) if e["experiment_id"] == experiment_id]
+    if existing:
+        print(
+            f"experiment {experiment_id} already exists with status "
+            f"{existing[0]['status']!r}; refusing to re-apply (an apply is a fact "
+            "about the past — new evidence mints a new proposal id)"
+        )
+        raise typer.Exit(3)
     if auto:
-        kept = len(list_experiments(db, "kept"))
-        reverted = len(list_experiments(db, "reverted"))
+        # Class-matched history only (Codex P2 review F6): rows of any other
+        # class — including crafted ones — never count toward THIS class's
+        # autonomy earn-out.
+        kept = len(
+            [e for e in list_experiments(db, "kept") if e["proposal_class"] == p.proposal_class]
+        )
+        reverted = len(
+            [
+                e
+                for e in list_experiments(db, "reverted")
+                if e["proposal_class"] == p.proposal_class
+            ]
+        )
         if not exp.auto_earned(kept, reverted):
             print(
                 f"--auto NOT earned for class {p.proposal_class}: kept={kept} "
@@ -365,7 +388,6 @@ def apply_cmd(
     except blockmod.BlockError as exc:
         print(f"propose-only (fail-closed, nothing written): {exc}")
         raise typer.Exit(3) from None
-    experiment_id = "exp-" + p.proposal_id.removeprefix("sha256:")[:16]
     saved = save_experiment(
         db,
         {
@@ -405,7 +427,11 @@ def apply_cmd(
                 "baseline": {"n0": n0, "k0": k0},
                 "decision_rule": {
                     "keep": "P(improvement) >= 95/100 and E[delta] >= MDE, n >= min_n per arm",
-                    "revert": "guardrail breach (instant) OR P(harm) >= 70/100 and E[harm] >= eps_harm",
+                    "revert": (
+                        "P(harm) >= 70/100 and E[harm] >= eps_harm (the gate math "
+                        "supports instant guardrail revert, but NO independent "
+                        "guardrail metric is wired in this lane version - Task 61)"
+                    ),
                     "mde": str(exp.DEFAULT_MDE),
                     "eps_harm": str(exp.DEFAULT_EPS_HARM),
                     "min_n": exp.DEFAULT_MIN_N,
@@ -415,6 +441,9 @@ def apply_cmd(
                     "observational - regression to the mean not controlled "
                     "(no per-run interleaving on a CLAUDE.md line)",
                     "Bayesian decision rule with a fixed Beta(1,1) prior",
+                    "no independent guardrail metric wired in this lane version - "
+                    "the harm posterior on the targeted class is the only automatic "
+                    "revert trigger (Task 61)",
                 ],
             },
             indent=2,
@@ -440,7 +469,27 @@ def review_applied_cmd(
 
     reviews = []
     for e in list_experiments(db, "applied"):
-        runs_after = [r.id for r in list_runs(db) if r.started_at > e["applied_at"]]
+        # Cohort formation is fail-closed (Codex P2 review F7): only the pinned
+        # UTC timestamp shape participates — for that exact shape lexicographic
+        # order IS chronological order; crafted/imported shapes are excluded.
+        if not exp.pinned_utc_ts(e["applied_at"]):
+            set_experiment_status(db, e["experiment_id"], "review")
+            reviews.append(
+                {
+                    "experiment_id": e["experiment_id"],
+                    "action": "review",
+                    "detail": (
+                        "applied_at is not the pinned UTC shape; a treatment "
+                        "cohort cannot be formed - routed to review"
+                    ),
+                }
+            )
+            continue
+        runs_after = [
+            r.id
+            for r in list_runs(db)
+            if exp.pinned_utc_ts(r.started_at) and r.started_at > e["applied_at"]
+        ]
         n1, k1 = proposemod.tool_failure_counts(db, e["tool"], runs_after)
         decision = exp.decide(
             e["baseline_n"],
@@ -460,6 +509,11 @@ def review_applied_cmd(
             "limits": [
                 "observational - regression to the mean not controlled",
                 "Bayesian decision rule with a fixed Beta(1,1) prior",
+                "no independent guardrail metric wired in this lane version - "
+                "the harm posterior on the targeted class is the only automatic "
+                "revert trigger (Task 61)",
+                "treatment cohort = runs whose started_at matches the pinned UTC "
+                "shape strictly after applied_at (other shapes excluded, fail-closed)",
             ],
         }
         entry.update(decision.display())
@@ -493,8 +547,14 @@ def auto_status_cmd(
     from agent_run_ledger.core.propose import PROPOSAL_CLASS
     from agent_run_ledger.core.storage import list_experiments
 
-    kept = len(list_experiments(db, "kept"))
-    reverted = len(list_experiments(db, "reverted"))
+    # Class-matched history only (Codex P2 review F6) — same filter as
+    # `arl apply --auto`.
+    kept = len(
+        [e for e in list_experiments(db, "kept") if e["proposal_class"] == PROPOSAL_CLASS]
+    )
+    reverted = len(
+        [e for e in list_experiments(db, "reverted") if e["proposal_class"] == PROPOSAL_CLASS]
+    )
     print(
         json.dumps(
             {
