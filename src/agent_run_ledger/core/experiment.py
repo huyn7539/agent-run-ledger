@@ -194,6 +194,29 @@ def ci95_display(n0: int, k0: int, n1: int, k1: int) -> tuple[float, float]:
     return (mean - 1.96 * sd, mean + 1.96 * sd)
 
 
+def guardrail_breach(
+    n0: int, k0: int, n1: int, k1: int, *, eps_harm: Fraction = DEFAULT_EPS_HARM
+) -> bool:
+    """Task 61 — the wired guardrail: ALL-class failure-receipt rate, treatment
+    vs the pre-registered baseline, judged with the SAME exact-rational
+    machinery at the REVERT bar. Deliberately has NO min_n requirement —
+    a breach reverts instantly from first exposure (asymmetric, Rule 6);
+    ``decide()`` already routes ``guardrail_breached=True`` to REVERT at any n.
+
+    Zero treatment exposure (n1 == 0) is no evidence, not a breach."""
+    if eps_harm <= 0:
+        raise ValueError("eps_harm must be > 0 (zero disables the guardrail)")
+    _validate_counts(n0, k0, "guardrail control")
+    _validate_counts(n1, k1, "guardrail treatment")
+    if n1 == 0:
+        return False
+    a0, b0 = k0 + 1, n0 - k0 + 1
+    a1, b1 = k1 + 1, n1 - k1 + 1
+    p_worse = prob_b_greater_a(a0, b0, a1, b1)  # P(p1 > p0): MORE failures overall
+    e_harm = Fraction(a1, a1 + b1) - Fraction(a0, a0 + b0)
+    return p_worse >= REVERT_CONFIDENCE and e_harm >= eps_harm
+
+
 def auto_earned(kept: int, reverted: int) -> bool:
     """P4: a proposal class earns --auto only when P(precision > 4/5) >= 95/100
     under a Beta(kept+1, reverted+1) posterior over ITS OWN kept/reverted

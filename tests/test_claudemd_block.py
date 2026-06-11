@@ -84,6 +84,20 @@ def test_mixed_newline_styles_fail_closed(tmp_path: Path) -> None:
     assert target.read_bytes() == before
 
 
+def test_atomic_write_refuses_when_target_appeared_since_read(tmp_path: Path) -> None:
+    """Task 61 (Codex P2 MISSING item — create race): preimage None means the
+    caller read NO file, so a file that exists at write time must never be
+    clobbered. Fail closed, nothing written."""
+    from agent_run_ledger.core.claudemd import _atomic_write
+
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("appeared between read and write\n", encoding="utf-8")
+    before = target.read_bytes()
+    with pytest.raises(BlockError, match="create race"):
+        _atomic_write(target, b"payload", None)
+    assert target.read_bytes() == before
+
+
 def test_revert_refuses_hostile_recorded_before_state(tmp_path: Path) -> None:
     """Codex P2 review F1 (CRITICAL): a crafted registry row must never become
     bytes in CLAUDE.md — restored lines pass the managed-line contract or the

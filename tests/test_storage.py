@@ -140,6 +140,46 @@ def test_init_db_idempotent_three_calls(tmp_path: Path) -> None:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == user_version_after_first
 
 
+def test_guardrail_columns_migration_three_times_idempotent(tmp_path: Path) -> None:
+    """Task 61 / Rule 5: a pre-61 experiments table (no guardrail columns)
+    gains guardrail_n0/guardrail_k0 on first init_db; calls 2/3 change nothing;
+    pre-existing rows survive with NULL guardrail baselines (fail-closed at
+    review time, never fabricated)."""
+    db = tmp_path / "ledger.sqlite"
+    init_db(db)
+    with connect(db) as conn:
+        # simulate the pre-61 schema: drop the new columns, keep a row
+        conn.execute("ALTER TABLE experiments DROP COLUMN guardrail_n0")
+        conn.execute("ALTER TABLE experiments DROP COLUMN guardrail_k0")
+        conn.execute(
+            """INSERT INTO experiments (
+                experiment_id, proposal_id, proposal_class, tool, claudemd_path,
+                line, before_block, after_block, assignment_basis, mde, eps_harm,
+                min_n, baseline_n, baseline_k, applied_at, status
+            ) VALUES ('exp-pre61', 'sha256:abc', 'retry_loop_budget', 't', 'CLAUDE.md',
+                '- l', '', '- l', 'observational', '1/50', '1/100',
+                5, 5, 4, '2025-01-01T00:00:00Z', 'applied')"""
+        )
+
+    schemas = []
+    for _ in range(3):
+        init_db(db)
+        with connect(db) as conn:
+            schemas.append(conn.execute("PRAGMA table_info(experiments)").fetchall())
+
+    cols = [c["name"] for c in schemas[0]]
+    assert "guardrail_n0" in cols and "guardrail_k0" in cols
+    assert [list(map(tuple, s)) for s in schemas[1:]] == [
+        list(map(tuple, schemas[0]))
+    ] * 2  # calls 2/3: zero schema change
+    with connect(db) as conn:
+        row = conn.execute(
+            "SELECT * FROM experiments WHERE experiment_id = 'exp-pre61'"
+        ).fetchone()
+        assert row["baseline_n"] == 5  # data survived
+        assert row["guardrail_n0"] is None and row["guardrail_k0"] is None
+
+
 def test_ingest_same_bundle_three_times_no_base_mutation(tmp_path: Path) -> None:
     """L3 / Rule 5: ingesting the same bundle 3x is idempotent on the FACT base —
     (a) no base-row mutation on calls 2/3, (b) deterministic outcome (reject),

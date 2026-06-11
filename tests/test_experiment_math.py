@@ -110,6 +110,26 @@ def test_ci95_is_display_only_floats() -> None:
     assert isinstance(lo, float) and isinstance(hi, float) and lo < hi
 
 
+def test_guardrail_breach_exact_vectors() -> None:
+    from fractions import Fraction
+
+    from agent_run_ledger.core.experiment import guardrail_breach
+
+    # zero treatment exposure = no evidence, never a breach
+    assert guardrail_breach(5, 3, 0, 0) is False
+    # the Task 61 e2e vector: control 3/5 -> treatment 4/4 overall failures
+    assert guardrail_breach(5, 3, 4, 4) is True
+    # overall rate IMPROVED -> no breach
+    assert guardrail_breach(5, 3, 4, 0) is False
+    # tiny worsening below eps_harm -> no breach (expected harm must clear eps)
+    assert guardrail_breach(100, 50, 100, 51, eps_harm=Fraction(5, 100)) is False
+    # invalid inputs rejected
+    with pytest.raises(ValueError):
+        guardrail_breach(5, 6, 1, 0)  # k > n
+    with pytest.raises(ValueError):
+        guardrail_breach(5, 3, 1, 0, eps_harm=Fraction(0))
+
+
 def test_pinned_utc_ts_accepts_only_the_ledger_shape() -> None:
     from agent_run_ledger.core.experiment import pinned_utc_ts
 

@@ -177,6 +177,8 @@ def init_db(db_path: Path) -> None:
                 min_n INTEGER NOT NULL,
                 baseline_n INTEGER NOT NULL,
                 baseline_k INTEGER NOT NULL,
+                guardrail_n0 INTEGER,
+                guardrail_k0 INTEGER,
                 applied_at TEXT NOT NULL,
                 status TEXT NOT NULL CHECK (
                     status IN ('applied', 'kept', 'reverted', 'review')
@@ -224,6 +226,13 @@ def init_db(db_path: Path) -> None:
         # an old row re-graded by report caps artifact receipts at L0 until
         # re-captured through an adapter, never the other way around.
         _ensure_column(conn, "runs", "adapter_provenanced", "INTEGER NOT NULL DEFAULT 0")
+        # Task 61: pre-registered guardrail baseline (all-class failure-receipt
+        # counts over the same window as the targeted metric). NULLABLE on
+        # purpose: a pre-61 experiment row has NO recorded guardrail baseline,
+        # and review-applied routes it to "review" rather than fabricating one
+        # (fail-closed — never invent a baseline after the fact).
+        _ensure_column(conn, "experiments", "guardrail_n0", "INTEGER")
+        _ensure_column(conn, "experiments", "guardrail_k0", "INTEGER")
         # Stamp the file's DDL version. Stays put once at USER_VERSION (no DDL on
         # the hot path → user_version does not increment on repeat init).
         current = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -392,6 +401,19 @@ def list_runs(db_path: Path) -> list[RunRecord]:
     return [_run_from_row(row) for row in rows]
 
 
+def provenanced_run_ids(db_path: Path) -> set[str]:
+    """Run ids whose facts were minted in-process by a capture adapter
+    (``adapter_provenanced=1``). Imported/neutral bundles are NOT in this set —
+    experiment cohorts are formed only from runs that verifiably executed on
+    this machine (Task 61: an imported run has no knowable relationship to
+    whether a locally-applied CLAUDE.md rule was in effect when it ran)."""
+    if not db_path.exists():
+        return set()
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT id FROM runs WHERE adapter_provenanced = 1").fetchall()
+    return {row["id"] for row in rows}
+
+
 def _sqlite_ro_uri(db_path: Path) -> str:
     """A read-only SQLite URI for *db_path*. Hand-rolled minimal percent-encoding
     (%, ?, #, space) because ``urllib`` is banned package-wide by the egress
@@ -485,15 +507,17 @@ def save_experiment(db_path: Path, fields: dict) -> str:
             """INSERT INTO experiments (
                 experiment_id, proposal_id, proposal_class, tool, claudemd_path,
                 line, before_block, after_block, assignment_basis, mde, eps_harm,
-                min_n, baseline_n, baseline_k, applied_at, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                min_n, baseline_n, baseline_k, guardrail_n0, guardrail_k0,
+                applied_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 fields["experiment_id"], fields["proposal_id"], fields["proposal_class"],
                 fields["tool"], fields["claudemd_path"], fields["line"],
                 fields["before_block"], fields["after_block"], fields["assignment_basis"],
                 fields["mde"], fields["eps_harm"], fields["min_n"],
-                fields["baseline_n"], fields["baseline_k"], fields["applied_at"],
-                fields["status"],
+                fields["baseline_n"], fields["baseline_k"],
+                fields["guardrail_n0"], fields["guardrail_k0"],
+                fields["applied_at"], fields["status"],
             ),
         )
     return "saved"

@@ -341,7 +341,11 @@ def apply_cmd(
     from agent_run_ledger.core import experiment as exp
     from agent_run_ledger.core import propose as proposemod
     from agent_run_ledger.core.models import utc_now_iso
-    from agent_run_ledger.core.storage import list_experiments, save_experiment
+    from agent_run_ledger.core.storage import (
+        list_experiments,
+        provenanced_run_ids,
+        save_experiment,
+    )
 
     p = proposemod.find_proposal(db, proposal_id)
     if p is None:
@@ -380,9 +384,15 @@ def apply_cmd(
                 "ledger's own kept/reverted history. Autonomy is earned, not granted."
             )
             raise typer.Exit(3)
-    # baseline (control arm) is captured BEFORE the mutation: the last 50 runs.
-    recent = [r.id for r in list_runs(db)[:50]]
+    # baseline (control arm) is captured BEFORE the mutation: the last 50
+    # ADAPTER-PROVENANCED runs (Task 61 — an imported run has no knowable
+    # relationship to local CLAUDE.md state, so it joins neither arm).
+    prov = provenanced_run_ids(db)
+    recent = [r.id for r in list_runs(db) if r.id in prov][:50]
     n0, k0 = proposemod.tool_failure_counts(db, p.tool, recent)
+    # pre-registered guardrail baseline: ALL-class failure-receipt rate over
+    # the SAME window (Task 61 — wired; previously disclosed-as-missing).
+    g_n0, g_k0 = proposemod.any_failure_counts(db, recent)
     try:
         result = blockmod.apply_line(claudemd, root, p.line, create=create)
     except blockmod.BlockError as exc:
@@ -408,6 +418,8 @@ def apply_cmd(
             "min_n": exp.DEFAULT_MIN_N,
             "baseline_n": n0,
             "baseline_k": k0,
+            "guardrail_n0": g_n0,
+            "guardrail_k0": g_k0,
             "applied_at": utc_now_iso(),
             "status": "applied",
         },
@@ -424,13 +436,18 @@ def apply_cmd(
                     f"retry_loop receipts for tool={p.tool} per run, "
                     "before vs after apply"
                 ),
+                "pre_registered_guardrail": (
+                    "ALL-class failure-receipt rate per run over the same window; "
+                    "breach at the revert bar = instant revert at any n"
+                ),
                 "baseline": {"n0": n0, "k0": k0},
+                "guardrail_baseline": {"n0": g_n0, "k0": g_k0},
                 "decision_rule": {
                     "keep": "P(improvement) >= 95/100 and E[delta] >= MDE, n >= min_n per arm",
                     "revert": (
-                        "P(harm) >= 70/100 and E[harm] >= eps_harm (the gate math "
-                        "supports instant guardrail revert, but NO independent "
-                        "guardrail metric is wired in this lane version - Task 61)"
+                        "guardrail breach (all-class failure rate worse at the "
+                        "revert bar - instant, any n) OR P(harm) >= 70/100 and "
+                        "E[harm] >= eps_harm on the targeted class"
                     ),
                     "mde": str(exp.DEFAULT_MDE),
                     "eps_harm": str(exp.DEFAULT_EPS_HARM),
@@ -441,9 +458,8 @@ def apply_cmd(
                     "observational - regression to the mean not controlled "
                     "(no per-run interleaving on a CLAUDE.md line)",
                     "Bayesian decision rule with a fixed Beta(1,1) prior",
-                    "no independent guardrail metric wired in this lane version - "
-                    "the harm posterior on the targeted class is the only automatic "
-                    "revert trigger (Task 61)",
+                    "cohorts = adapter-provenanced runs only (imported runs have "
+                    "no knowable relationship to local CLAUDE.md state)",
                 ],
             },
             indent=2,
@@ -465,9 +481,14 @@ def review_applied_cmd(
     from agent_run_ledger.core import claudemd as blockmod
     from agent_run_ledger.core import experiment as exp
     from agent_run_ledger.core import propose as proposemod
-    from agent_run_ledger.core.storage import list_experiments, set_experiment_status
+    from agent_run_ledger.core.storage import (
+        list_experiments,
+        provenanced_run_ids,
+        set_experiment_status,
+    )
 
     reviews = []
+    prov = provenanced_run_ids(db)
     for e in list_experiments(db, "applied"):
         # Cohort formation is fail-closed (Codex P2 review F7): only the pinned
         # UTC timestamp shape participates — for that exact shape lexicographic
@@ -485,20 +506,45 @@ def review_applied_cmd(
                 }
             )
             continue
+        # Pre-61 rows have no pre-registered guardrail baseline — never
+        # fabricate one after the fact (fail-closed).
+        if e.get("guardrail_n0") is None or e.get("guardrail_k0") is None:
+            set_experiment_status(db, e["experiment_id"], "review")
+            reviews.append(
+                {
+                    "experiment_id": e["experiment_id"],
+                    "action": "review",
+                    "detail": (
+                        "no pre-registered guardrail baseline on this experiment "
+                        "(pre-Task-61 row); re-apply to register one - routed to review"
+                    ),
+                }
+            )
+            continue
+        # Treatment cohort: adapter-provenanced runs with the pinned timestamp
+        # shape, strictly after apply (Task 61 — imported runs join neither arm).
         runs_after = [
             r.id
             for r in list_runs(db)
-            if exp.pinned_utc_ts(r.started_at) and r.started_at > e["applied_at"]
+            if r.id in prov
+            and exp.pinned_utc_ts(r.started_at)
+            and r.started_at > e["applied_at"]
         ]
         n1, k1 = proposemod.tool_failure_counts(db, e["tool"], runs_after)
+        g_n1, g_k1 = proposemod.any_failure_counts(db, runs_after)
+        eps = Fraction(e["eps_harm"])
+        breached = exp.guardrail_breach(
+            e["guardrail_n0"], e["guardrail_k0"], g_n1, g_k1, eps_harm=eps
+        )
         decision = exp.decide(
             e["baseline_n"],
             e["baseline_k"],
             n1,
             k1,
             mde=Fraction(e["mde"]),
-            eps_harm=Fraction(e["eps_harm"]),
+            eps_harm=eps,
             min_n=e["min_n"],
+            guardrail_breached=breached,
         )
         entry: dict = {
             "experiment_id": e["experiment_id"],
@@ -506,14 +552,18 @@ def review_applied_cmd(
             "control": {"n0": e["baseline_n"], "k0": e["baseline_k"]},
             "treatment": {"n1": n1, "k1": k1},
             "ci95_display": list(exp.ci95_display(e["baseline_n"], e["baseline_k"], n1, k1)),
+            "guardrail": {
+                "control": {"n0": e["guardrail_n0"], "k0": e["guardrail_k0"]},
+                "treatment": {"n1": g_n1, "k1": g_k1},
+                "breached": breached,
+                "metric": "ALL-class failure-receipt rate per run",
+            },
             "limits": [
                 "observational - regression to the mean not controlled",
                 "Bayesian decision rule with a fixed Beta(1,1) prior",
-                "no independent guardrail metric wired in this lane version - "
-                "the harm posterior on the targeted class is the only automatic "
-                "revert trigger (Task 61)",
-                "treatment cohort = runs whose started_at matches the pinned UTC "
-                "shape strictly after applied_at (other shapes excluded, fail-closed)",
+                "treatment cohort = adapter-provenanced runs whose started_at "
+                "matches the pinned UTC shape strictly after applied_at "
+                "(imported runs and other shapes excluded, fail-closed)",
             ],
         }
         entry.update(decision.display())

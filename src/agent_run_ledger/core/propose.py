@@ -149,6 +149,19 @@ def find_proposal(db_path: Path, proposal_id: str) -> Proposal | None:
     return None
 
 
+def any_failure_counts(db_path: Path, run_ids: list[str]) -> tuple[int, int]:
+    """(n, k) over *run_ids*: k = runs whose receipts include ANY failure class
+    (recomputed on read — judgments are never stored). This is the guardrail
+    metric (Task 61): a rule that suppresses the targeted class while overall
+    failures rise must revert, not be kept."""
+    n = len(run_ids)
+    k = 0
+    for run_id in run_ids:
+        if build_receipts(load_bundle(db_path, run_id)):
+            k += 1
+    return n, k
+
+
 def tool_failure_counts(db_path: Path, tool: str, run_ids: list[str]) -> tuple[int, int]:
     """(n, k) over *run_ids*: k = runs whose receipts include a retry_loop on
     *tool* (recomputed on read — judgments are never stored)."""

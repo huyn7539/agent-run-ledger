@@ -23,9 +23,13 @@ from agent_run_ledger.core.storage import list_experiments, save_bundle
 runner = CliRunner()
 
 
-def _failing_run(run_id: str, started: str, tool: str = "crm.lookup") -> TraceBundle:
+def _failing_run(
+    run_id: str, started: str, tool: str = "crm.lookup", provenanced: bool = True
+) -> TraceBundle:
     """A run with a REAL derived retry loop on *tool* (3 attempts, distinct
-    turns, same scope/fingerprint) — the same shape the detector collapses."""
+    turns, same scope/fingerprint) — the same shape the detector collapses.
+    ``provenanced=True`` simulates a capture-adapter run (the cohort-eligible
+    kind); pass False to simulate a neutral/forged import."""
     run = RunRecord(
         id=run_id,
         workflow="wf",
@@ -53,11 +57,11 @@ def _failing_run(run_id: str, started: str, tool: str = "crm.lookup") -> TraceBu
         )
         for i in range(1, 4)
     ]
-    bundle = TraceBundle(run=run, steps=steps)
+    bundle = TraceBundle(run=run, steps=steps, adapter_provenanced=provenanced)
     return bundle.with_prescriptions(analyze_bundle(bundle))
 
 
-def _clean_run(run_id: str, started: str) -> TraceBundle:
+def _clean_run(run_id: str, started: str, provenanced: bool = True) -> TraceBundle:
     run = RunRecord(
         id=run_id,
         workflow="wf",
@@ -76,7 +80,7 @@ def _clean_run(run_id: str, started: str) -> TraceBundle:
         started_at=started,
         ended_at=started,
     )
-    return TraceBundle(run=run, steps=[step])
+    return TraceBundle(run=run, steps=[step], adapter_provenanced=provenanced)
 
 
 def _seed_baseline(db: Path) -> None:
@@ -295,6 +299,8 @@ def _forged_experiment_row(i: int, proposal_class: str) -> dict:
         "min_n": 5,
         "baseline_n": 5,
         "baseline_k": 4,
+        "guardrail_n0": 5,
+        "guardrail_k0": 4,
         "applied_at": "2025-01-01T00:00:00Z",
         "status": "kept",
     }
@@ -406,3 +412,146 @@ def test_trailing_newline_tool_name_abstains(tmp_path: Path) -> None:
     proposals, abstentions = mine_proposals(db)
     assert proposals == []
     assert any("closed slot charset" in a for a in abstentions)
+
+
+# --- Task 61: wired guardrail + cohort provenance ----------------------------------
+
+
+def test_guardrail_breach_reverts_when_targeted_class_alone_would_continue(
+    tmp_path: Path,
+) -> None:
+    """THE Task 61 e2e (Rule 9 prescribed): the targeted class looks fine
+    (n1 < min_n -> CONTINUE on its own), but the ALL-class failure rate got
+    WORSE -> the wired guardrail reverts instantly. A rule that suppresses its
+    own metric while overall failures rise must never be kept."""
+    from fractions import Fraction
+
+    from agent_run_ledger.core import experiment as exp
+
+    db = tmp_path / "ledger.sqlite"
+    claudemd = tmp_path / "CLAUDE.md"
+    claudemd.write_text("# user rules\n", encoding="utf-8")
+    # control: 3 crm.lookup loops + 2 clean -> targeted (5,3), guardrail (5,3)
+    for i in range(1, 4):
+        save_bundle(db, _failing_run(f"run_fail{i}", f"2025-01-01T01:0{i}:00Z"))
+    save_bundle(db, _clean_run("run_clean0", "2025-01-01T01:04:00Z"))
+    save_bundle(db, _clean_run("run_clean1", "2025-01-01T01:05:00Z"))
+
+    result = runner.invoke(app, ["propose", "--db", str(db)])
+    proposal_id = json.loads(result.output)["proposals"][0]["proposal_id"]
+    result = runner.invoke(
+        app,
+        ["apply", proposal_id, "--db", str(db), "--claudemd", str(claudemd),
+         "--root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["guardrail_baseline"] == {"n0": 5, "k0": 3}
+
+    # treatment: 4 runs, ZERO crm.lookup loops (targeted metric "fine") but
+    # every one fails on a DIFFERENT tool -> all-class rate 4/4 vs 3/5
+    for i in range(1, 5):
+        save_bundle(
+            db, _failing_run(f"run_shift{i}", f"2027-01-01T00:0{i}:00Z", tool="web.fetch")
+        )
+    # the targeted class ALONE would CONTINUE (n1=4 < min_n=5, no guardrail):
+    alone = exp.decide(5, 3, 4, 0, mde=Fraction(2, 100), eps_harm=Fraction(1, 100), min_n=5)
+    assert alone.decision == "CONTINUE"
+
+    result = runner.invoke(
+        app,
+        ["review-applied", "--db", str(db), "--claudemd", str(claudemd),
+         "--root", str(tmp_path)],
+    )
+    review = json.loads(result.output)["reviews"][0]
+    assert review["guardrail"]["breached"] is True
+    assert review["guardrail"]["treatment"] == {"n1": 4, "k1": 4}
+    assert review["decision"] == "REVERT", review
+    assert review["action"] == "reverted"
+    assert "guardrail" in review["reasons"][0]
+    text = claudemd.read_text(encoding="utf-8")
+    assert BEGIN_MARKER not in text
+    assert "# user rules" in text
+    assert list_experiments(db, "reverted")
+
+
+def test_imported_runs_join_neither_arm(tmp_path: Path) -> None:
+    """Task 61 cohort provenance: imported (non-adapter-provenanced) runs are
+    excluded from BOTH arms — they cannot inflate the control baseline and
+    they cannot stuff the treatment cohort toward KEEP."""
+    db = tmp_path / "ledger.sqlite"
+    claudemd = tmp_path / "CLAUDE.md"
+    _seed_baseline(db)  # 5 provenanced: 4 loops + 1 clean
+    # 10 imported failing runs BEFORE apply — must not join control
+    for i in range(1, 11):
+        save_bundle(
+            db,
+            _failing_run(f"imp_fail{i}", f"2025-01-01T00:{i:02d}:00Z", provenanced=False),
+        )
+    result = runner.invoke(app, ["propose", "--db", str(db)])
+    proposal_id = json.loads(result.output)["proposals"][0]["proposal_id"]
+    result = runner.invoke(
+        app,
+        ["apply", proposal_id, "--db", str(db), "--claudemd", str(claudemd),
+         "--root", str(tmp_path), "--create"],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    assert receipt["baseline"] == {"n0": 5, "k0": 4}  # imported runs not counted
+    # 6 imported clean runs AFTER apply — must not earn a KEEP
+    for i in range(1, 7):
+        save_bundle(
+            db, _clean_run(f"imp_clean{i}", f"2027-01-01T00:0{i}:00Z", provenanced=False)
+        )
+    result = runner.invoke(
+        app,
+        ["review-applied", "--db", str(db), "--claudemd", str(claudemd),
+         "--root", str(tmp_path)],
+    )
+    review = json.loads(result.output)["reviews"][0]
+    assert review["treatment"] == {"n1": 0, "k1": 0}
+    assert review["decision"] == "CONTINUE"
+
+
+def test_pre_task61_experiment_rows_route_to_review(tmp_path: Path) -> None:
+    """A row with no pre-registered guardrail baseline (pre-61 schema) is never
+    measured against a baseline fabricated after the fact — fail-closed review."""
+    from agent_run_ledger.core.storage import save_experiment
+
+    db = tmp_path / "ledger.sqlite"
+    _seed_baseline(db)
+    row = _forged_experiment_row(0, "retry_loop_budget")
+    row["guardrail_n0"] = None
+    row["guardrail_k0"] = None
+    row["status"] = "applied"
+    save_experiment(db, row)
+    result = runner.invoke(app, ["review-applied", "--db", str(db)])
+    assert result.exit_code == 0, result.output
+    review = json.loads(result.output)["reviews"][0]
+    assert review["action"] == "review"
+    assert "guardrail baseline" in review["detail"]
+    assert list_experiments(db, "review")
+
+
+def test_export_never_carries_experiment_snapshots(tmp_path: Path) -> None:
+    """Direct snapshot-redaction proof (Codex P2 MISSING item): CLAUDE.md
+    before/after block text in the experiments registry is LOCAL-SECRET and
+    must never appear in `arl export` output, raw or scrubbed."""
+    from agent_run_ledger.core.storage import save_experiment
+
+    db = tmp_path / "ledger.sqlite"
+    _seed_baseline(db)
+    sentinel = "SNAPSHOT-SENTINEL-bf0a91"
+    row = _forged_experiment_row(1, "retry_loop_budget")
+    row["before_block"] = f"- user secret line {sentinel}"
+    row["after_block"] = f"- user secret line {sentinel}\n- applied line"
+    save_experiment(db, row)
+    out = tmp_path / "export.json"
+    result = runner.invoke(
+        app, ["export", "--run", "run_fail1", "--out", str(out), "--db", str(db)]
+    )
+    assert result.exit_code == 0, result.output
+    text = out.read_text(encoding="utf-8")
+    assert sentinel not in text
+    assert "experiments" not in text
+    assert "before_block" not in text

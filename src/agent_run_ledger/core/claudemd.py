@@ -122,11 +122,17 @@ def _split_block(text: str) -> tuple[list[str], list[str], list[str], str, bool]
 def _atomic_write(path: Path, payload: bytes, preimage_hash: str | None) -> None:
     """Same-directory temp + fsync + os.replace, with a last-instant CAS check.
     A concurrent edit between our read and the replace aborts with BlockError
-    (the caller reports propose-only/review; nothing was written)."""
+    (the caller reports propose-only/review; nothing was written).
+
+    ``preimage_hash=None`` means the caller read NO file — so a file that has
+    appeared since is a create race and must not be clobbered (Task 61, from
+    the Codex P2 MISSING-test list)."""
     if preimage_hash is not None:
         current = _sha256(path.read_bytes())
         if current != preimage_hash:
             raise BlockError("CLAUDE.md changed since it was read (CAS mismatch) — aborting")
+    elif path.exists():
+        raise BlockError("target appeared since it was read (create race) — aborting")
     fd, tmp_name = tempfile.mkstemp(prefix=".arl-block-", dir=str(path.parent))
     try:
         with os.fdopen(fd, "wb") as fh:
