@@ -29,7 +29,7 @@ import json
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HOME = Path.home()
@@ -50,6 +50,22 @@ MIN_SHARED_RARE = 4
 COMMON_EDIT_NAMES = {"_index.md", "readme.md", "claude.md", "memory.md",
                      "log.md", "index.md", "settings.json", "agents.md",
                      "pyproject.toml", "package.json", "cargo.toml", ".gitignore"}
+# taxonomy C4 (Codex-amended): living docs never count as reopens
+LIVING_PATTERNS = re.compile(
+    r"(failure-index|codex-integration|_state\.md$|^user_.*\.md$|"
+    r"^feedback_.*\.md$|^settings|protocol\.md$|-model\.md$|-history\.md$)",
+    re.IGNORECASE)
+# taxonomy B3 (Codex-amended): continuations are not corrective re-asks
+CONT_RE = re.compile(r"^(continue|proceed|next\b|resume|go ahead|keep going|"
+                     r"run\b|ok\b|okay\b|yes\b|do it)", re.IGNORECASE)
+CORRECTIVE_RE = re.compile(r"\b(still|again|wrong|broken|didn'?t|doesn'?t work|"
+                           r"not working|error|failed|why is|isn'?t)", re.IGNORECASE)
+# duplicated from failure_detectors (import would be circular): completion claims
+CLAIM_RE = re.compile(
+    r"\b(all (?:tests?|checks?) pass|tests? (?:are )?green|suite is green|"
+    r"done\b|complete(?:d|ly)?\b|ready for (?:first )?user|production[- ]ready|"
+    r"works? (?:now|correctly)|fixed\b|resolved\b|verified\b|ship(?:ped|s)?\b|"
+    r"good to go|no (?:errors?|regressions?))", re.IGNORECASE)
 
 
 def norm_project(raw: str) -> str:
@@ -102,7 +118,10 @@ def ts_of(s: str):
 
 def parse_cc(path: Path) -> dict | None:
     s = {"id": path.stem, "kind": "cc", "project": path.parent.name, "path": str(path),
-         "start": None, "end": None, "prompts": [], "edits": [], "machine": False}
+         "start": None, "end": None, "prompts": [], "edits": [], "machine": False,
+         "claimed": set()}
+    edit_evts: list[tuple[int, str]] = []  # (event idx, basename)
+    claim_evts: list[int] = []
     sidechain_hits = 0
     entries = 0
     try:
@@ -136,18 +155,33 @@ def parse_cc(path: Path) -> dict | None:
                             s["prompts"].append((t, text[:1500], len(s["edits"])))
                 elif typ == "assistant":
                     for p in (obj.get("message") or {}).get("content") or []:
-                        if (isinstance(p, dict) and p.get("type") == "tool_use"
+                        if not isinstance(p, dict):
+                            continue
+                        if (p.get("type") == "tool_use"
                                 and p.get("name") in ("Edit", "Write", "NotebookEdit")):
                             fp = (p.get("input") or {}).get("file_path") or \
                                  (p.get("input") or {}).get("notebook_path")
                             if fp:
-                                s["edits"].append(Path(str(fp)).name.lower())
+                                name = Path(str(fp)).name.lower()
+                                s["edits"].append(name)
+                                edit_evts.append((entries, name))
+                        elif (p.get("type") == "text"
+                              and CLAIM_RE.search(p.get("text") or "")):
+                            claim_evts.append(entries)
     except OSError:
         return None
     if entries and sidechain_hits > entries * 0.5:
         s["machine"] = True
     if s["prompts"] and MACHINE_FIRST_PROMPT.match(s["prompts"][0][1]):
         s["machine"] = True
+    # C4 file-specific done linkage (plan W2): a completion claim within 5
+    # events AFTER a file's last edit marks the file claimed-done here
+    last_edit: dict[str, int] = {}
+    for evt, name in edit_evts:
+        last_edit[name] = evt
+    for name, evt in last_edit.items():
+        if any(evt < ce <= evt + 5 for ce in claim_evts):
+            s["claimed"].add(name)
     return s if s["prompts"] else None
 
 
@@ -156,10 +190,15 @@ PATCH_FILE = re.compile(r"\*\*\* (?:Update|Add) File: (.+)")
 
 def parse_codex(path: Path) -> dict | None:
     s = {"id": path.stem, "kind": "codex", "project": "", "path": str(path),
-         "start": None, "end": None, "prompts": [], "edits": [], "machine": False}
+         "start": None, "end": None, "prompts": [], "edits": [], "machine": False,
+         "claimed": set()}
+    edit_evts: list[tuple[int, str]] = []
+    claim_evts: list[int] = []
+    entries = 0
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
             for line in fh:
+                entries += 1
                 try:
                     obj = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
@@ -179,14 +218,27 @@ def parse_codex(path: Path) -> dict | None:
                         if text and not text.startswith(CODEX_EXCLUDE_PREFIX) \
                                 and len(toks(text)) >= MIN_PROMPT_TOKENS:
                             s["prompts"].append((t, text[:1500], len(s["edits"])))
+                    elif pay.get("type") == "message" and pay.get("role") == "assistant":
+                        for c in pay.get("content") or []:
+                            if (isinstance(c, dict) and c.get("type") == "output_text"
+                                    and CLAIM_RE.search(c.get("text") or "")):
+                                claim_evts.append(entries)
                     elif pay.get("type") == "function_call":
                         args = str(pay.get("arguments") or "")
                         for m in PATCH_FILE.finditer(args):
-                            s["edits"].append(Path(m.group(1).strip().strip('"')).name.lower())
+                            name = Path(m.group(1).strip().strip('"')).name.lower()
+                            s["edits"].append(name)
+                            edit_evts.append((entries, name))
     except OSError:
         return None
     if s["prompts"] and MACHINE_FIRST_PROMPT.match(s["prompts"][0][1]):
         s["machine"] = True
+    last_edit: dict[str, int] = {}
+    for evt, name in edit_evts:
+        last_edit[name] = evt
+    for name, evt in last_edit.items():
+        if any(evt < ce <= evt + 5 for ce in claim_evts):
+            s["claimed"].add(name)
     return s if s["prompts"] else None
 
 
@@ -205,9 +257,52 @@ def collect() -> list[dict]:
     return list(seen.values())
 
 
+_REWORK: dict = {}  # repo-name(lower) -> git-rework.json entry; loaded by main
+
+
+def _git_doneness(proj: str, basename: str, sess: list[dict]) -> str | None:
+    """C4 doneness via git (plan W2, Codex-specified arithmetic):
+    fix_after_feat {file, fix, gap_h, date}: feat_date := date − gap_h hours,
+    fix_date := date; fire when an earlier session end falls in
+    [feat_date, fix_date+1d). fix_chains {file, from, to}: window [from−2d, to]."""
+    rw = _REWORK.get(proj)
+    if not rw:
+        return None
+    ends = [s["end"] for s in sess[:-1]]
+    for e in rw.get("fix_after_feat", []):
+        if Path(e.get("file", "")).name.lower() != basename:
+            continue
+        try:
+            fix_dt = datetime.fromisoformat(e["date"]).replace(tzinfo=timezone.utc)
+            feat_dt = fix_dt - timedelta(hours=float(e.get("gap_h", 0)))
+        except (ValueError, TypeError):
+            continue
+        if any(feat_dt <= end < fix_dt + timedelta(days=1) for end in ends):
+            return (f"git: feat-then-fix on {basename} "
+                    f"({e['date']}: {e.get('fix', '')[:60]})")
+    for e in rw.get("fix_chains", []):
+        if Path(e.get("file", "")).name.lower() != basename:
+            continue
+        try:
+            lo = datetime.fromisoformat(e["from"]).replace(tzinfo=timezone.utc) \
+                - timedelta(days=2)
+            hi = datetime.fromisoformat(e["to"]).replace(tzinfo=timezone.utc) \
+                + timedelta(days=1)
+        except (ValueError, TypeError):
+            continue
+        if any(lo <= end < hi for end in ends):
+            return (f"git: fix-chain on {basename} ({e['from']}→{e['to']}, "
+                    f"{e.get('n_fixes_14d', '?')} fixes/14d)")
+    return None
+
+
 def main(outdir: str) -> None:
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
+    rw_path = out / "git-rework.json"
+    if rw_path.exists():
+        for r in json.loads(rw_path.read_text(encoding="utf-8")):
+            _REWORK[r["repo"].lower()] = r
     sessions = collect()
     human = [s for s in sessions if not s["machine"]]
     print(f"sessions parsed: {len(sessions)} (human: {len(human)}, "
@@ -227,6 +322,10 @@ def main(outdir: str) -> None:
                 if gap < GAP_MIN_WITHIN:
                     continue
                 sim = jac(a, toks(xj))
+                # B3 (plan W2): continuations are not corrective re-asks
+                if sim >= SIM_WITHIN and CONT_RE.match(xj) \
+                        and not CORRECTIVE_RE.search(xj):
+                    continue
                 if sim >= SIM_WITHIN:
                     candidates.append({
                         "class": "C1-repeat-ask-with-gap", "score": round(sim, 2),
@@ -292,11 +391,30 @@ def main(outdir: str) -> None:
         for n, gset in name_df.items():
             if n in COMMON_EDIT_NAMES or not (1 < len(gset) <= 8):
                 continue
+            # C4 living-doc exclusions (plan W2): pattern list + behavioral
+            if LIVING_PATTERNS.search(n):
+                continue
             gl = sorted(gset, key=lambda gi: group[gi]["start"])
             days = [group[gi]["start"].date() for gi in gl]
+            if len(gset) >= 4 and (days[-1] - days[0]).days >= 14:
+                continue  # living-by-behavior, not a reopen
             if (days[-1] - days[0]).days < 1:
                 continue
             sess = [group[gi] for gi in gl]
+            # C4 doneness evidence on the SPECIFIC file: (a) claimed-done in
+            # an earlier session with a later session ≥1 day after it, or
+            # (b) git landed-commit-then-refix join (loaded by main)
+            done_idx = next((i for i, s in enumerate(sess[:-1])
+                             if n in s.get("claimed", ())), None)
+            doneness = None
+            if done_idx is not None and \
+                    (sess[-1]["start"].date() - sess[done_idx]["end"].date()).days >= 1:
+                doneness = f"claimed-done in {sess[done_idx]['id'][:8]} " \
+                           f"({sess[done_idx]['start'].date().isoformat()})"
+            else:
+                doneness = _git_doneness(proj, n, sess)
+            if not doneness:
+                continue
             candidates.append({
                 "class": "C2-loopback-reopen", "score": 0.99, "project": proj,
                 "kind": sess[0]["kind"],
@@ -304,6 +422,7 @@ def main(outdir: str) -> None:
                 "dates": [d.isoformat() for d in days],
                 "flags": ["files-reopened"],
                 "evidence": {"reopened_files": [n],
+                             "doneness": doneness,
                              "span_days": (days[-1] - days[0]).days,
                              "edits_per_session": [len(s["edits"]) for s in sess]},
             })
