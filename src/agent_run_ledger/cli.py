@@ -521,12 +521,17 @@ def review_applied_cmd(
             set_experiment_status(db, e["experiment_id"], "kept")
             entry["action"] = "kept"
         elif decision.decision == "REVERT":
-            r = blockmod.revert_block(
-                Path(e["claudemd_path"]) if claudemd == Path("CLAUDE.md") else claudemd,
-                root,
-                e["after_block"],
-                e["before_block"],
-            )
+            try:
+                r = blockmod.revert_block(
+                    Path(e["claudemd_path"]) if claudemd == Path("CLAUDE.md") else claudemd,
+                    root,
+                    e["after_block"],
+                    e["before_block"],
+                )
+            except blockmod.BlockError as exc:
+                # target missing/unsafe/ambiguous -> never crash, never write;
+                # the experiment routes to review (fail-closed)
+                r = blockmod.RevertResult("review", f"revert refused fail-closed: {exc}")
             new_status = "reverted" if r.status == "reverted" else "review"
             set_experiment_status(db, e["experiment_id"], new_status)
             entry["action"] = new_status

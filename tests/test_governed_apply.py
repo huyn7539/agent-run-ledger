@@ -355,6 +355,39 @@ def test_malformed_started_at_runs_are_excluded_from_treatment(tmp_path: Path) -
     assert review["decision"] == "CONTINUE"
 
 
+def test_review_applied_routes_to_review_when_target_vanished(tmp_path: Path) -> None:
+    """A REVERT decision whose CLAUDE.md target no longer exists must route to
+    review without crashing and without writing anything (fail-closed)."""
+    db = tmp_path / "ledger.sqlite"
+    claudemd = tmp_path / "CLAUDE.md"
+    claudemd.write_text("# user rules\n", encoding="utf-8")
+    for i in range(1, 4):
+        save_bundle(db, _failing_run(f"run_fail{i}", f"2025-01-01T01:0{i}:00Z"))
+    save_bundle(db, _clean_run("run_clean0", "2025-01-01T01:04:00Z"))
+    save_bundle(db, _clean_run("run_clean1", "2025-01-01T01:05:00Z"))
+    result = runner.invoke(app, ["propose", "--db", str(db)])
+    proposal_id = json.loads(result.output)["proposals"][0]["proposal_id"]
+    result = runner.invoke(
+        app,
+        ["apply", proposal_id, "--db", str(db), "--claudemd", str(claudemd),
+         "--root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    for i in range(1, 9):
+        save_bundle(db, _failing_run(f"run_worse{i}", f"2027-01-01T00:0{i}:00Z"))
+    claudemd.unlink()  # the target vanishes before the review
+    result = runner.invoke(
+        app,
+        ["review-applied", "--db", str(db), "--claudemd", str(claudemd),
+         "--root", str(tmp_path)],
+    )
+    assert result.exit_code == 0, result.output
+    review = json.loads(result.output)["reviews"][0]
+    assert review["action"] == "review"
+    assert "fail-closed" in review["revert_detail"]
+    assert list_experiments(db, "review")
+
+
 def test_proposal_id_preimage_is_delimiter_unambiguous() -> None:
     """Codex P2 review F8: a crafted run id containing the old NUL delimiter
     must not collide two different evidence sets into one proposal id."""
