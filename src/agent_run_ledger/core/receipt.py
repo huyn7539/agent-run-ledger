@@ -140,7 +140,12 @@ def build_receipts(bundle: TraceBundle) -> list[RepairReceipt]:
                 },
                 proof_level=proof_level,
                 confidence=_confidence(proof_level),
-                limits=_limits(proof_level, model_supplied, explicit_count),
+                limits=_limits(
+                    proof_level,
+                    model_supplied,
+                    explicit_count,
+                    imported_facts=not bundle.adapter_provenanced,
+                ),
                 next_evidence=_next_evidence(proof_level),
                 outcome_delta=_outcome_delta(rx.expected_impact),
             )
@@ -550,7 +555,13 @@ def _confidence(proof_level: str) -> str:
     return {"L2": "medium", "L1": "low", "L0": "low"}.get(proof_level, "low")
 
 
-def _limits(proof_level: str, model_supplied: bool, explicit_count: bool = False) -> list[str]:
+def _limits(
+    proof_level: str,
+    model_supplied: bool,
+    explicit_count: bool = False,
+    *,
+    imported_facts: bool = False,
+) -> list[str]:
     limits = [
         # Constraint 5: regression-to-the-mean disclosure.
         "Before/after deltas are uncorrected for regression to the mean — ARL "
@@ -578,6 +589,19 @@ def _limits(proof_level: str, model_supplied: bool, explicit_count: bool = False
             "The observed retry count is app-supplied (explicit), not derived by "
             "ARL from raw attempts in this trace — mechanical-sufficiency grading "
             "is capped at L1 (Task 53)."
+        )
+    if imported_facts:
+        # Codex Rule 8 re-review F-01 (2026-06-11): a forged import can fabricate
+        # raw attempts that ARL's own collapse then "derives". Repair-class grades
+        # describe the bundle's OWN facts (forging them defrauds only the forger's
+        # repair), but a receipt used as cross-party PROOF must carry the
+        # provenance on its face — so it cannot be laundered as capture-verified.
+        # (The accusation class, artifact_failure, stays HARD-gated to L0 without
+        # adapter provenance — that protects third parties, this protects proof.)
+        limits.append(
+            "Facts were imported from a file, not captured in-process by an ARL "
+            "adapter — grades describe the imported file's own contents, which "
+            "its author controls."
         )
     if proof_level != "L2":
         limits.append(

@@ -39,6 +39,9 @@ SENTINEL = "SECRET-TASK46-SENTINEL"
 
 
 def _bundle_with_raw_content() -> TraceBundle:
+    """Sentinels under EVERY raw-content carrier the share form must scrub:
+    allowed-key step metadata, the patch, run.outcome_json, and every free-text
+    prescription field (Codex Rule 8 re-review F-02)."""
     run = RunRecord(
         id="run_t46",
         workflow="w",
@@ -48,6 +51,7 @@ def _bundle_with_raw_content() -> TraceBundle:
         started_at="2026-06-11T00:00:00Z",
         ended_at="2026-06-11T00:00:01Z",
         success_label="failed",
+        outcome_json=f'{{"note": "{SENTINEL}-outcome"}}',
     )
     metadata = {key: f"{SENTINEL}-{key}" for key in sorted(_RAW_CONTENT_METADATA_KEYS)}
     metadata["model"] = "gpt-4o-mini"  # bounded-fact key: must SURVIVE export
@@ -64,16 +68,20 @@ def _bundle_with_raw_content() -> TraceBundle:
         id="rx1",
         run_id=run.id,
         severity="high",
-        root_cause="retry loop",
-        one_line_fix="Set crm.lookup retry budget and fail closed.",
-        evidence=["step_id=s1", "retry_count=2 additional attempts"],
+        root_cause=f"retry loop seen near {SENTINEL}-root",
+        one_line_fix=f"Set crm.lookup retry budget ({SENTINEL}-fix).",
+        evidence=[
+            "step_id=s1",
+            "retry_count=2 additional attempts",
+            f"free-text note: {SENTINEL}-evidence",
+        ],
         patch_type="unified_diff",
         patch=(
             "--- a/secrets/config.py\n+++ b/secrets/config.py\n@@ -1 +1 @@\n"
             f"-API_KEY = '{SENTINEL}'\n+API_KEY = 'rotated'\n"
         ),
-        expected_impact={},
-        regression_test_template="",
+        expected_impact={"note": f"{SENTINEL}-impact"},
+        regression_test_template=f"def test_x():\n    assert '{SENTINEL}-reg'\n",
     )
     return TraceBundle(run=run, steps=[step], prescriptions=[rx])
 
@@ -89,7 +97,15 @@ def test_default_export_carries_no_raw_content_values(tmp_path: Path) -> None:
     assert step["metadata"]["model"] == "gpt-4o-mini"
     assert set(step["metadata"].get("_scrubbed_keys", [])) == set(_RAW_CONTENT_METADATA_KEYS)
     # the patch (built FROM before/path/after values) is replaced by the marker
-    assert "scrubbed at export" in data["prescriptions"][0]["patch"]
+    rx = data["prescriptions"][0]
+    assert "scrubbed at export" in rx["patch"]
+    # F-02: free-text prescription fields + run outcome are scrubbed too; the
+    # closed-grammar evidence lines receipts grade from SURVIVE (reproducible),
+    # the free-text line is dropped and counted.
+    assert data["run"].get("outcome_json") in (None, "")
+    assert "step_id=s1" in rx["evidence"]
+    assert "retry_count=2 additional attempts" in rx["evidence"]
+    assert "[1 evidence line(s) scrubbed at export]" in rx["evidence"]
 
 
 def test_raw_local_export_keeps_values_with_disclosure(tmp_path: Path) -> None:
@@ -130,6 +146,36 @@ def test_export_is_idempotent_three_times(tmp_path: Path) -> None:
         write_trace(bundle, out)
         outs.append(out.read_bytes())
     assert outs[0] == outs[1] == outs[2]
+
+
+def test_scrub_marker_satisfies_every_patch_type_and_never_earns_l2() -> None:
+    """F-03 lock (the comment-only claim now BITES): the inert marker passes all
+    four patch_type validators on re-import AND cannot earn L2 through retry-cap
+    grading."""
+    from agent_run_ledger.core.io import _PATCH_SCRUB_MARKER
+    from agent_run_ledger.core.models import PATCH_TYPES
+    from agent_run_ledger.core.receipt import _grade_retry_cap, _is_retry_cap_diff
+
+    base = _bundle_with_raw_content()
+    for patch_type in PATCH_TYPES:
+        rx = PrescriptionRecord(
+            id="rx_m",
+            run_id="run_t46",
+            severity="low",
+            root_cause="x",
+            one_line_fix="x",
+            evidence=[],
+            patch_type=patch_type,
+            patch=_PATCH_SCRUB_MARKER,
+            expected_impact={},
+            regression_test_template="",
+        )
+        bundle = TraceBundle(run=base.run, steps=base.steps, prescriptions=[rx])
+        bundle.validate()  # raises if the marker fails this patch_type's validator
+
+    assert _is_retry_cap_diff(_PATCH_SCRUB_MARKER) is False
+    # even with a corroborated observed count, the marker grades L0 (not L2/L1)
+    assert _grade_retry_cap("unified_diff", _PATCH_SCRUB_MARKER, 5) == "L0"
 
 
 def test_cli_export_default_is_scrubbed_and_raw_local_opt_in(tmp_path: Path) -> None:

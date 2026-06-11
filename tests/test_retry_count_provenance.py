@@ -99,14 +99,29 @@ def test_explicit_retry_count_caps_at_l1() -> None:
     assert any("app-supplied" in lim or "explicit" in lim for lim in receipts[0].limits)
 
 
-def test_derived_retry_count_still_earns_l2() -> None:
-    """The trusted lane is unchanged: ARL collapses 6 raw attempts itself
-    (distinct turns, same scope/fingerprint) -> derived retry_count=5 -> L2."""
+def test_derived_retry_count_still_earns_l2_with_import_disclosure() -> None:
+    """The derived lane keeps L2 — but this fixture is an IMPORT-shaped bundle
+    (adapter_provenanced=False), and a forged import can fabricate raw attempts
+    that ARL's own collapse then derives (Codex Rule 8 re-review F-01). Decision
+    recorded in the codex-review file: repair-class grades describe the bundle's
+    OWN facts, so derived L2 stands, but the receipt must carry the provenance
+    on its face so it cannot be laundered as capture-verified proof."""
     steps = [_attempt(f"s{i}", f"turn_{i}") for i in range(1, 7)]
     bundle = TraceBundle(run=_run("run_f3"), steps=steps, prescriptions=[_rx(5)])
     receipts = build_receipts(bundle)
     assert len(receipts) == 1
     assert receipts[0].proof_level == "L2"
+    assert any("imported from a file" in lim for lim in receipts[0].limits)
+
+
+def test_adapter_provenanced_run_carries_no_import_disclosure() -> None:
+    steps = [_attempt(f"s{i}", f"turn_{i}") for i in range(1, 7)]
+    bundle = TraceBundle(
+        run=_run("run_f3"), steps=steps, prescriptions=[_rx(5)], adapter_provenanced=True
+    )
+    receipts = build_receipts(bundle)
+    assert receipts[0].proof_level == "L2"
+    assert not any("imported from a file" in lim for lim in receipts[0].limits)
 
 
 def test_collapse_marks_derived_and_passthrough_stays_explicit() -> None:

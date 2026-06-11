@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -132,6 +133,22 @@ _PATCH_SCRUB_MARKER = (
 )
 
 
+_TEXT_SCRUB_MARKER = "[scrubbed at export (Task 46): free-text field stays local]"
+
+# The closed grammar of ARL-authored evidence lines that receipts grade from.
+# Share-form exports keep ONLY lines that fullmatch one of these — bounded
+# charsets, no free text — so grading reproduces on re-import while anything
+# else (imported/forged/free-text evidence) is dropped, fail-closed.
+_SHARE_EVIDENCE_GRAMMAR = (
+    re.compile(r"^step_id=[A-Za-z0-9._:-]{1,128}$"),
+    re.compile(r"^retry_count=\d{1,6} additional attempts$"),
+    re.compile(r"^total_attempts=\d{1,6}$"),
+    re.compile(r"^step_cost_usd=[0-9.]{1,32}$"),
+    re.compile(r"^step_error_class=[A-Za-z_]{1,64}$"),
+    re.compile(r"^rule=(R1|R2)$"),
+)
+
+
 def _scrub_for_share(data: dict[str, Any]) -> dict[str, Any]:
     """Project a bundle dict to the SHARE form (Task 46 — the egress boundary).
 
@@ -160,9 +177,39 @@ def _scrub_for_share(data: dict[str, Any]) -> dict[str, Any]:
                 }
                 kept["_scrubbed_keys"] = dropped
                 step["metadata"] = kept
+    # Codex Rule 8 re-review F-02 (CRITICAL): metadata + patch were not the only
+    # raw-content carriers. The run's outcome_json (user/app-authored JSON) and
+    # every free-text prescription field can carry arbitrary content — on an
+    # IMPORTED bundle they are attacker-authored outright. The share form keeps
+    # only the closed-grammar evidence lines receipts actually grade from
+    # (fail-closed: a line that does not fullmatch the grammar is dropped and
+    # counted), and scrubs the rest.
+    run = data.get("run")
+    if isinstance(run, dict) and run.get("outcome_json"):
+        run["outcome_json"] = None
+        run["_outcome_scrubbed"] = True
     for rx in data.get("prescriptions", []):
         if rx.get("patch"):
             rx["patch"] = _PATCH_SCRUB_MARKER
+        for field in ("root_cause", "one_line_fix"):
+            if rx.get(field):
+                rx[field] = _TEXT_SCRUB_MARKER
+        if rx.get("regression_test_template"):
+            rx["regression_test_template"] = ""
+        if rx.get("expected_impact"):
+            rx["expected_impact"] = {}
+        evidence = rx.get("evidence")
+        if isinstance(evidence, list):
+            kept_lines = [
+                line
+                for line in evidence
+                if isinstance(line, str)
+                and any(g.fullmatch(line.strip()) for g in _SHARE_EVIDENCE_GRAMMAR)
+            ]
+            dropped_n = len(evidence) - len(kept_lines)
+            if dropped_n:
+                kept_lines.append(f"[{dropped_n} evidence line(s) scrubbed at export]")
+            rx["evidence"] = kept_lines
     return data
 
 
