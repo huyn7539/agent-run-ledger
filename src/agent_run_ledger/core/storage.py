@@ -156,6 +156,32 @@ def init_db(db_path: Path) -> None:
                 failure_class TEXT NOT NULL DEFAULT 'retry_loop'
                     CHECK (failure_class IN ('retry_loop', 'artifact_failure'))
             );
+
+            -- Task 60: the governed-apply experiment registry (pre-registered
+            -- metric + exact revert material). LOCAL-SECRET by classification:
+            -- before/after block text MAY mirror CLAUDE.md content; this table
+            -- is NEVER exported (write_trace serializes a TraceBundle only) —
+            -- the io._scrub_for_share chokepoint comment names this class.
+            CREATE TABLE IF NOT EXISTS experiments (
+                experiment_id TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL,
+                proposal_class TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                claudemd_path TEXT NOT NULL,
+                line TEXT NOT NULL,
+                before_block TEXT NOT NULL,
+                after_block TEXT NOT NULL,
+                assignment_basis TEXT NOT NULL,
+                mde TEXT NOT NULL,
+                eps_harm TEXT NOT NULL,
+                min_n INTEGER NOT NULL,
+                baseline_n INTEGER NOT NULL,
+                baseline_k INTEGER NOT NULL,
+                applied_at TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('applied', 'kept', 'reverted', 'review')
+                )
+            );
             """
         )
         _ensure_column(
@@ -440,6 +466,65 @@ def merge_run_outcome(db_path: Path, run_id: str, key: str, value: dict) -> str:
             (json.dumps(outcome, sort_keys=True), run_id),
         )
     return "set"
+
+
+# --- Task 60: experiments registry (governed-apply lane) ----------------------
+
+def save_experiment(db_path: Path, fields: dict) -> str:
+    """Insert an experiment row; idempotent on experiment_id (Rule 5): an
+    existing id returns "already" and writes NOTHING (an apply is a fact about
+    the past — first write wins, same discipline as merge_run_outcome)."""
+    init_db(db_path)
+    with connect(db_path) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM experiments WHERE experiment_id = ?", (fields["experiment_id"],)
+        ).fetchone()
+        if exists:
+            return "already"
+        conn.execute(
+            """INSERT INTO experiments (
+                experiment_id, proposal_id, proposal_class, tool, claudemd_path,
+                line, before_block, after_block, assignment_basis, mde, eps_harm,
+                min_n, baseline_n, baseline_k, applied_at, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                fields["experiment_id"], fields["proposal_id"], fields["proposal_class"],
+                fields["tool"], fields["claudemd_path"], fields["line"],
+                fields["before_block"], fields["after_block"], fields["assignment_basis"],
+                fields["mde"], fields["eps_harm"], fields["min_n"],
+                fields["baseline_n"], fields["baseline_k"], fields["applied_at"],
+                fields["status"],
+            ),
+        )
+    return "saved"
+
+
+def list_experiments(db_path: Path, status: str | None = None) -> list[dict]:
+    if not db_path.exists():
+        return []
+    init_db(db_path)
+    with connect(db_path) as conn:
+        if status is None:
+            rows = conn.execute(
+                "SELECT * FROM experiments ORDER BY applied_at, experiment_id"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM experiments WHERE status = ? ORDER BY applied_at, experiment_id",
+                (status,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_experiment_status(db_path: Path, experiment_id: str, status: str) -> None:
+    init_db(db_path)
+    with connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE experiments SET status = ? WHERE experiment_id = ?",
+            (status, experiment_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"experiment not found: {experiment_id}")
 
 
 def _row_get(row: sqlite3.Row, key: str, default=None):

@@ -300,6 +300,220 @@ def serve_cmd(
         print("arl serve: stopped")
 
 
+@app.command("propose")
+def propose_cmd(
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+) -> None:
+    """Mine the ledger for templated CLAUDE.md correction candidates (Task 60).
+
+    Templates only, no model calls; a tool name failing the closed slot charset
+    is an ABSTENTION, never a proposal. Apply with: arl apply <proposal_id>."""
+    from agent_run_ledger.core.propose import MIN_RECEIPTS, mine_proposals
+
+    proposals, abstentions = mine_proposals(db)
+    payload = {
+        "proposals": [p.display() for p in proposals],
+        "abstentions": abstentions,
+        "note": (
+            f"templated proposals from repeated retry_loop receipts (>= {MIN_RECEIPTS} "
+            "runs per tool); ids re-derive deterministically from the ledger facts"
+        ),
+    }
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@app.command("apply")
+def apply_cmd(
+    proposal_id: str = typer.Argument(..., help="A proposal id from `arl propose`."),
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    claudemd: Path = typer.Option(Path("CLAUDE.md"), "--claudemd", help="Target CLAUDE.md."),
+    root: Path = typer.Option(Path("."), "--root", help="Project root the target must stay inside."),
+    create: bool = typer.Option(False, "--create", help="Create CLAUDE.md if absent."),
+    auto: bool = typer.Option(
+        False,
+        "--auto",
+        help="Only proceed if this class EARNED autonomy from this ledger's own history.",
+    ),
+) -> None:
+    """Apply a mined proposal into the ARL-managed CLAUDE.md block, recording a
+    pre-registered experiment (metric, window, exact revert) — Task 60 P2."""
+    from agent_run_ledger.core import claudemd as blockmod
+    from agent_run_ledger.core import experiment as exp
+    from agent_run_ledger.core import propose as proposemod
+    from agent_run_ledger.core.models import utc_now_iso
+    from agent_run_ledger.core.storage import list_experiments, save_experiment
+
+    p = proposemod.find_proposal(db, proposal_id)
+    if p is None:
+        print("proposal not found in this ledger (run `arl propose`; ids re-derive from facts)")
+        raise typer.Exit(2)
+    if auto:
+        kept = len(list_experiments(db, "kept"))
+        reverted = len(list_experiments(db, "reverted"))
+        if not exp.auto_earned(kept, reverted):
+            print(
+                f"--auto NOT earned for class {p.proposal_class}: kept={kept} "
+                f"reverted={reverted}; needs P(precision > 4/5) >= 95/100 from THIS "
+                "ledger's own kept/reverted history. Autonomy is earned, not granted."
+            )
+            raise typer.Exit(3)
+    # baseline (control arm) is captured BEFORE the mutation: the last 50 runs.
+    recent = [r.id for r in list_runs(db)[:50]]
+    n0, k0 = proposemod.tool_failure_counts(db, p.tool, recent)
+    try:
+        result = blockmod.apply_line(claudemd, root, p.line, create=create)
+    except blockmod.BlockError as exc:
+        print(f"propose-only (fail-closed, nothing written): {exc}")
+        raise typer.Exit(3) from None
+    experiment_id = "exp-" + p.proposal_id.removeprefix("sha256:")[:16]
+    saved = save_experiment(
+        db,
+        {
+            "experiment_id": experiment_id,
+            "proposal_id": p.proposal_id,
+            "proposal_class": p.proposal_class,
+            "tool": p.tool,
+            "claudemd_path": str(claudemd),
+            "line": p.line,
+            "before_block": result.before_block,
+            "after_block": result.after_block,
+            "assignment_basis": (
+                "observational-before-after (a CLAUDE.md line applies to every "
+                "run; per-run interleaving is impossible for this lane)"
+            ),
+            "mde": str(exp.DEFAULT_MDE),
+            "eps_harm": str(exp.DEFAULT_EPS_HARM),
+            "min_n": exp.DEFAULT_MIN_N,
+            "baseline_n": n0,
+            "baseline_k": k0,
+            "applied_at": utc_now_iso(),
+            "status": "applied",
+        },
+    )
+    print(
+        json.dumps(
+            {
+                "experiment_id": experiment_id,
+                "proposal_id": p.proposal_id,
+                "applied_line": p.line,
+                "changed": result.changed,
+                "registry": saved,
+                "pre_registered_metric": (
+                    f"retry_loop receipts for tool={p.tool} per run, "
+                    "before vs after apply"
+                ),
+                "baseline": {"n0": n0, "k0": k0},
+                "decision_rule": {
+                    "keep": "P(improvement) >= 95/100 and E[delta] >= MDE, n >= min_n per arm",
+                    "revert": "guardrail breach (instant) OR P(harm) >= 70/100 and E[harm] >= eps_harm",
+                    "mde": str(exp.DEFAULT_MDE),
+                    "eps_harm": str(exp.DEFAULT_EPS_HARM),
+                    "min_n": exp.DEFAULT_MIN_N,
+                },
+                "revert_path": "CAS on the recorded post-apply block (arl review-applied)",
+                "limits": [
+                    "observational - regression to the mean not controlled "
+                    "(no per-run interleaving on a CLAUDE.md line)",
+                    "Bayesian decision rule with a fixed Beta(1,1) prior",
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@app.command("review-applied")
+def review_applied_cmd(
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+    claudemd: Path = typer.Option(Path("CLAUDE.md"), "--claudemd", help="Target CLAUDE.md."),
+    root: Path = typer.Option(Path("."), "--root", help="Project root."),
+) -> None:
+    """Measure every applied experiment against its pre-registered metric and
+    route it: KEEP / AUTO-REVERT (CAS) / CONTINUE — Task 60 P3."""
+    from fractions import Fraction
+
+    from agent_run_ledger.core import claudemd as blockmod
+    from agent_run_ledger.core import experiment as exp
+    from agent_run_ledger.core import propose as proposemod
+    from agent_run_ledger.core.storage import list_experiments, set_experiment_status
+
+    reviews = []
+    for e in list_experiments(db, "applied"):
+        runs_after = [r.id for r in list_runs(db) if r.started_at > e["applied_at"]]
+        n1, k1 = proposemod.tool_failure_counts(db, e["tool"], runs_after)
+        decision = exp.decide(
+            e["baseline_n"],
+            e["baseline_k"],
+            n1,
+            k1,
+            mde=Fraction(e["mde"]),
+            eps_harm=Fraction(e["eps_harm"]),
+            min_n=e["min_n"],
+        )
+        entry: dict = {
+            "experiment_id": e["experiment_id"],
+            "tool": e["tool"],
+            "control": {"n0": e["baseline_n"], "k0": e["baseline_k"]},
+            "treatment": {"n1": n1, "k1": k1},
+            "ci95_display": list(exp.ci95_display(e["baseline_n"], e["baseline_k"], n1, k1)),
+            "limits": [
+                "observational - regression to the mean not controlled",
+                "Bayesian decision rule with a fixed Beta(1,1) prior",
+            ],
+        }
+        entry.update(decision.display())
+        if decision.decision == "KEEP":
+            set_experiment_status(db, e["experiment_id"], "kept")
+            entry["action"] = "kept"
+        elif decision.decision == "REVERT":
+            r = blockmod.revert_block(
+                Path(e["claudemd_path"]) if claudemd == Path("CLAUDE.md") else claudemd,
+                root,
+                e["after_block"],
+                e["before_block"],
+            )
+            new_status = "reverted" if r.status == "reverted" else "review"
+            set_experiment_status(db, e["experiment_id"], new_status)
+            entry["action"] = new_status
+            entry["revert_detail"] = r.detail
+        else:
+            entry["action"] = "continue (stays applied; posterior shown)"
+        reviews.append(entry)
+    print(json.dumps({"reviews": reviews}, indent=2, sort_keys=True))
+
+
+@app.command("auto-status")
+def auto_status_cmd(
+    db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
+) -> None:
+    """Show whether the (single) proposal class has EARNED --auto from this
+    ledger's own kept/reverted history — Task 60 P4."""
+    from agent_run_ledger.core import experiment as exp
+    from agent_run_ledger.core.propose import PROPOSAL_CLASS
+    from agent_run_ledger.core.storage import list_experiments
+
+    kept = len(list_experiments(db, "kept"))
+    reverted = len(list_experiments(db, "reverted"))
+    print(
+        json.dumps(
+            {
+                "class": PROPOSAL_CLASS,
+                "kept": kept,
+                "reverted": reverted,
+                "auto_earned": exp.auto_earned(kept, reverted),
+                "bar": "P(precision > 4/5) >= 95/100 over Beta(kept+1, reverted+1)",
+                "note": (
+                    "autonomy is earned per class from THIS ledger's own outcomes; "
+                    "the default is and stays propose-only"
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 @app.command("report")
 def report(
     run: str = typer.Option(..., "--run", help="Run id."),
