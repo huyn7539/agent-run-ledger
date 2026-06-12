@@ -281,12 +281,26 @@ def export_trace(
 @app.command("serve")
 def serve_cmd(
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
-    port: int = typer.Option(0, "--port", help="Port (default 0 = ephemeral, printed)."),
+    port: int = typer.Option(
+        8765, "--port", help="Port on 127.0.0.1 (default 8765; 0 = ephemeral, printed)."
+    ),
 ) -> None:
     """Read-only localhost dashboard over the ledger (binds 127.0.0.1 only)."""
     from agent_run_ledger.core.serve import make_server
 
-    server = make_server(db, port=port)
+    # A fixed, documented default port — the ephemeral default produced servers
+    # nobody could find (the operator, a reviewing agent, and a browser all
+    # assumed a stable port on day one). Socket reuse stays disabled, so a busy
+    # port fails CLOSED with direction instead of silently picking another.
+    try:
+        server = make_server(db, port=port)
+    except OSError:
+        console.print(
+            f"error: cannot bind 127.0.0.1:{port} — another `arl serve` may already be "
+            "running (check its terminal for the URL), or the port is briefly held "
+            "after a recent stop. Pass --port 0 for an ephemeral port."
+        )
+        raise typer.Exit(1)
     bound = server.server_address[1]
     # ASCII-only output (cp1252 console class): plain prints, no glyphs.
     print(f"arl serve: http://127.0.0.1:{bound}/")

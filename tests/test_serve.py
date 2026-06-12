@@ -8,6 +8,10 @@ What is pinned here (Codex spec-review amendments, all adopted):
   * routing: exact match only; traversal and percent-encoding rejected
   * /verdicts symlink refusal; missing-DB and missing-run honesty
   * storage: connect_readonly cannot write and never creates files
+  * CLI: default port is FIXED (8765) and documented; a busy port fails CLOSED
+    with direction (the ephemeral default produced servers nobody could find
+    on release night — operator, reviewing agent, and browser all assumed a
+    stable port)
 """
 
 from __future__ import annotations
@@ -220,3 +224,40 @@ def test_verdicts_symlink_is_refused(served, tmp_path: Path) -> None:
     status, _, body = _get(host, port, "/verdicts")
     assert status == 404
     assert '"v":1' not in body
+
+
+# --- CLI port contract: fixed default, fail-closed on busy port ---------------
+
+
+def test_cli_serve_default_port_is_fixed_and_documented() -> None:
+    from typer.testing import CliRunner
+
+    from agent_run_ledger.cli import app
+
+    result = CliRunner().invoke(app, ["serve", "--help"])
+    assert result.exit_code == 0
+    assert "8765" in result.output  # the documented default a browser can find
+
+
+def test_cli_serve_busy_port_fails_closed_with_direction(tmp_path: Path) -> None:
+    """A busy port must produce exit 1 and an actionable message, never a
+    traceback and never a silent fallback to a different port."""
+    import socket
+
+    from typer.testing import CliRunner
+
+    from agent_run_ledger.cli import app
+
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        blocker.bind(("127.0.0.1", 0))
+        blocker.listen(1)
+        busy_port = blocker.getsockname()[1]
+        result = CliRunner().invoke(
+            app, ["serve", "--port", str(busy_port), "--db", str(tmp_path / "l.sqlite")]
+        )
+        assert result.exit_code == 1
+        assert "cannot bind" in result.output
+        assert "--port 0" in result.output  # the escape hatch is named
+    finally:
+        blocker.close()
