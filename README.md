@@ -4,8 +4,6 @@ Agent Run Ledger (ARL) is a local-first CLI that turns AI coding-agent runs into
 **graded repair receipts** — and, in verdict mode, into a machine-consumable exit
 code your loop can gate on.
 
-Wedge:
-
 > Every agent run gets a ledger record. Every DETECTED failure gets a graded repair
 > receipt — and, when the evidence supports it, a concrete fix artifact.
 
@@ -230,19 +228,19 @@ artifact · success-lie detector (R1 success claim after test deletion, R2
 completion claim with zero mutating calls; graded L0–L1, abstain-by-default) ·
 graded RepairReceipts (L0–L2 implemented honestly) · verdict mode with
 the loop exit contract · archive sweep (`arl sweep`) · OpenAI + Codex adapters
-isolated outside the core package · read-only Claude/Codex review bus under
-`.agentbus/`.
+isolated outside the core package.
 
 Not included: hosted SaaS · auth/billing · public dashboard · memory graph ·
 autonomous patch application · telemetry of any kind.
 
 ## Status
 
-The detector and receipts run on real Codex sessions today; most well-run
-interactive sessions grade **clean**, which is the honest expected result — the
-target population is unattended/scheduled/CI runs, where waste hides. The current
-validation bar (2026-06-10): graded receipts produced on real users' real failures,
-measured by whether they **apply** the fix — not stars, not installs.
+Early. v0.1.0, two detector classes, honest about both. The detectors and receipts
+run on real Codex and Claude Code sessions today; most well-run interactive
+sessions grade **clean**, which is the expected result — the target population is
+unattended/scheduled/CI runs, where waste hides. This project measures itself by
+one number: receipts whose fix a real person **applied** — not stars, not installs.
+If that's you, run `arl mark-applied` and open an issue; you are the metric.
 
 ## Reporting issues & sharing receipts
 
@@ -272,10 +270,16 @@ prompts and tool output. If a session is needed to reproduce a parser bug,
 share boundary; `--raw-local` keeps full fidelity for local use only — do not
 paste that form).
 
-## Private Alpha Definition
+## Paid pilots & audits
 
-An activated install means a builder produces at least one verdict or trace report
-on their own machine. Package downloads, stars, and README views do not count.
+The tool is free. If you want me in the loop, that's the paid part: I run
+**design-partner pilots** ($500–2,000/mo — weekly sweeps of your team's agent
+sessions, graded receipts of what your agents actually did versus what they
+claimed, detectors built from your failure fixtures) and **fixed-price agent
+audits**. Everything stays local to your machines — I never need your session
+content, and the receipts you get are content-free by construction.
+
+Email **kibahung19@gmail.com**, or open an issue titled `pilot`.
 
 ## License
 
