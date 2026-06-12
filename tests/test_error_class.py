@@ -3,9 +3,8 @@
 A bounded, typed label derived from the error class name; the raw message is
 dropped at the StepRecord construction chokepoint so nothing leaks at rest or on
 egress. The existing redaction chokepoint (sanitize_error -> 'details redacted')
-is KEPT intact; error_class is ADDED alongside (operator decision). The wedge's
-retry/cost prescription reads error_class for severity. TDD red-first
-(Task 44, Phase 4).
+is KEPT intact; error_class is ADDED alongside (deliberate compatibility choice).
+The retry/cost prescription reads error_class for severity. TDD red-first.
 """
 
 from __future__ import annotations

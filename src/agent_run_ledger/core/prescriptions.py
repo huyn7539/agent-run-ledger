@@ -122,7 +122,7 @@ def _retry_loop_prescription(
     return PrescriptionRecord(
         id=f"rx_{uuid4().hex[:12]}",
         run_id=bundle.run.id,
-        # L8: severity reads the typed error_class (the bounded fact the wedge
+        # L8: severity reads the typed error_class (the bounded fact this detector
         # needs), not the always-redacted `error` string. A captured error class
         # means the retry loop ended in a real failure -> high severity.
         severity="high" if step.error_class else "medium",

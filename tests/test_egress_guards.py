@@ -268,7 +268,7 @@ def test_cloud_sync_path_warns(tmp_path, capsys, monkeypatch) -> None:
 # --- L12 / L13: the locked contracts exist as text ----------------------------
 
 def test_adr_stub_locks_telemetry_chokepoint_and_shapeevent() -> None:
-    adr = _SRC.parent.parent / ".agentbus" / "ADR-002-egress-chokepoint.md"
+    adr = _SRC.parent.parent / "docs" / "adr" / "ADR-002-egress-chokepoint.md"
     assert adr.exists(), "L10/L12 ADR stub missing"
     text = adr.read_text(encoding="utf-8")
     assert "core/telemetry.emit()" in text  # L10 chokepoint

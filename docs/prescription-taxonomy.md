@@ -26,7 +26,7 @@ Default trigger:
 Default allowed retries:
 
 - `allowed_retries = 0`
-- V0 favors fail-fast over hidden retry loops because the product wedge is
+- V0 favors fail-fast over hidden retry loops because the product's core promise is
   measurable budget control, not silent recovery.
 
 Cost calculation:

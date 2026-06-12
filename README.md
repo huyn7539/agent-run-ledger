@@ -1,274 +1,186 @@
-# Agent Run Ledger
+<h1 align="center">Agent Run Ledger</h1>
 
-Agent Run Ledger (ARL) is a local-first CLI that turns AI coding-agent runs into
-**graded repair receipts** — and, in verdict mode, into a machine-consumable exit
-code your loop can gate on.
+<p align="center"><strong>Did your AI coding agent actually do what it claimed?</strong></p>
 
-> Every agent run gets a ledger record. Every DETECTED failure gets a graded repair
-> receipt — and, when the evidence supports it, a concrete fix artifact.
+<p align="center"><strong>graded receipts · honest abstain · exit codes for loops · 100% local · zero egress</strong></p>
 
-(A clean run with no detected failure emits no prescription and no receipt — by
-design: ARL does not invent receipts where there is nothing to repair. "The run
-finished" and "the run is verified clean" are different claims; ARL exists to keep
-them different.)
+<p align="center">
+  <a href="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml"><img src="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/huyn7539/agent-run-ledger/releases"><img src="https://img.shields.io/github/v/release/huyn7539/agent-run-ledger" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="License: FSL-1.1-ALv2"></a>
+  <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+">
+</p>
 
-Everything runs on your machine. Prompt/output content never leaves it. There is
-no telemetry and no OUTBOUND network code in the package (enforced by AST tests
-— dynamic imports and outbound socket primitives are banned too). The optional
-`arl serve` dashboard binds 127.0.0.1 only; nothing leaves your machine.
+<p align="center">
+  <a href="#get-started-60-seconds">Get started</a> ·
+  <a href="#how-it-works-30-seconds">How it works</a> ·
+  <a href="#gate-your-loop-on-it">Gate your loop</a> ·
+  <a href="#honest-scope">Honest scope</a> ·
+  <a href="#paid-pilots--audits">Paid pilots</a>
+</p>
 
-## Install
+---
 
-No account, no config, nothing leaves your machine. Get the source, then pick
-whichever installer you have:
+ARL reads the session logs your coding agent already writes — Claude Code, Codex
+CLI, OpenAI Agents SDK — and tells you when a run *lied*: retry loops that burned
+your quota, success claims with nothing behind them. Every detected failure
+becomes a **graded repair receipt** with a proof level, a fix direction, and a
+stated list of what is *not* proven. Every clean verdict names exactly what was
+checked. Nothing ever leaves your machine — there is no outbound network code in
+the package, and a build-failing test keeps it that way.
+
+## Get started (60 seconds)
+
+**1. Install** (Python 3.12+; no account, no config):
 
 ```bash
-git clone https://github.com/huyn7539/agent-run-ledger
-cd agent-run-ledger
-
-# with uv (https://docs.astral.sh/uv/) — installs the `arl` command on your PATH
-uv tool install .
-
-# or with pip / pipx
-pip install .            # into the current environment
-pipx install .           # isolated, on your PATH
-
-# or in one step, without a checkout
 uv tool install git+https://github.com/huyn7539/agent-run-ledger
 ```
 
-Check the install: `arl --version` (include this in any bug report).
-
-If `arl` isn't found after install (common on machines with several Pythons,
-where the `arl` on PATH may belong to a different interpreter), the always-correct
-invocation is:
+<details><summary>pip / pipx / from a checkout</summary>
 
 ```bash
-python -m agent_run_ledger verdict --latest      # same as `arl verdict --latest`
-# or, from a checkout:  uv run arl verdict --latest
+pip install git+https://github.com/huyn7539/agent-run-ledger
+pipx install git+https://github.com/huyn7539/agent-run-ledger
+
+# if `arl` isn't on PATH afterwards (machines with several Pythons):
+python -m agent_run_ledger --version    # always works
+```
+</details>
+
+**2. Prove the alarm works** — selftest runs a bundled known-bad session through
+the real pipeline:
+
+```text
+$ arl selftest
+selftest: running a bundled known-bad run through the real pipeline
+  receipt fired: retry_loop at L1 (confidence low)
+  fix direction: Set demo.flaky_tool retry budget to 0 and fail closed.
+selftest: PASS — the alarm fires; 'clean' on your runs means the detector
+abstained, not that it is deaf
 ```
 
-Requires Python 3.12+.
+**3. Grade the sessions you already have** — months of evidence are sitting on
+your disk right now:
 
-## Quick Start
-
-Three commands, in this order:
-
-```powershell
-arl selftest                  # 1. proves a receipt fires — so 'clean' means something
-arl sweep ~/.claude/projects  # 2. grade months of sessions you ALREADY have
-arl init --hooks              # 3. every future session gets a verdict automatically
+```bash
+arl sweep ~/.claude/projects     # Claude Code archive
+arl sweep ~/.codex/sessions      # Codex CLI archive
 ```
 
-Start with the sweep, not today's session: the archive is where a receipt is most
-likely to fire, because ARL's value concentrates on the runs you are NOT watching —
-unattended loops, scheduled jobs, CI lanes, the overnight batch. If you read every
-diff interactively, expect clean verdicts; that is the detector abstaining, and it
-is the honest answer.
+Each file gets a verdict: `clean`, `fired` (with receipts), or `error` — counted
+separately, never hidden. Start with the archive, not today's session: failures
+hide in the runs you *weren't* watching — unattended loops, overnight batches,
+CI lanes. If you babysat every diff, expect clean verdicts; that's the detector
+abstaining, and it's the honest answer.
 
-Grade a single session any time:
+**4. Grade every future session automatically:**
 
-```powershell
-arl verdict --latest          # newest Codex CLI session
-arl verdict --latest-claude   # newest Claude Code session
+```bash
+arl init --hooks     # installs a Claude Code Stop hook (idempotent merge)
 ```
 
-When you actually apply a receipt's fix, say so — it's the one metric this
+When a receipt's fix actually helps you, say so — it's the one metric this
 project measures itself by:
 
-```powershell
+```bash
 arl mark-applied <run-id>
 ```
 
-Update later with `uv tool upgrade agent-run-ledger` (or `pipx upgrade`). There
-is no auto-update and no update check — those need network calls, and ARL has
-none, structurally.
+## How it works (30 seconds)
 
-Or the classic ledger flow:
-
-```powershell
-arl run-demo --variant retry-loop    # stores run "run_retry_loop"
-arl run-demo --variant clean         # stores run "run_clean_demo"
-arl list-runs
-arl report --run run_retry_loop
-arl compare --left run_retry_loop --right run_clean_demo
+```
+ your agent's own session logs (already on disk — ARL changes nothing)
+   ~/.claude/projects/**/*.jsonl · ~/.codex/sessions/** · SDK trace exports
+        │
+        ▼
+ ┌──────────────────────────────────────────────────────┐
+ │  ARL  (runs locally — nothing leaves your machine)   │
+ │  adapters (hostile-input parsing, size/depth bounds) │
+ │     → detectors: retry_loop · artifact_failure       │
+ │     → graded receipt: proof level L0–L6 · fix        │
+ │       direction · limits (what is NOT proven) ·      │
+ │       coverage (what was and wasn't checked)         │
+ └──────────────────────────────────────────────────────┘
+        │
+        ▼
+ exit code (0/3/1) · JSON (arl.verdict/v1) · local SQLite ledger · HTML report
 ```
 
-## How this differs from session observability
+Receipts are advisory — ARL never applies a patch. Proof levels are graded by
+static inspection of the artifact, never by the model's say-so: L2 means *the
+fix mechanically removes the deterministic failure path, verifiable without a
+re-run*.
 
-Local session viewers (agenttrace and similar) tell you a run was *unhealthy* —
-cost, tokens, retries, tool failures, a health score. ARL answers a different
-question: did the run *lie*? It names a structural failure, hands back an applyable
-fix direction, and attaches an **honest proof grade** with the limits stated — and
-on a healthy run it says nothing, on purpose. It competes on graded correctness,
-abstain-by-default, and the fix artifact, not on how many log formats it reads.
-Point a tracer at the run for health; point ARL at it for a verdict.
+## Gate your loop on it
 
-## Verdict mode — the loop contract
-
-Autonomous loops today exit on tests-pass, string matching, or the agent's own
-say-so. `arl verdict` gives a loop an independent, graded exit:
+Autonomous loops today exit on tests-pass, string-matching, or the agent's own
+say-so. `arl verdict` is an independent, graded exit:
 
 | Exit | Meaning |
 |---|---|
 | `0` | clean — no structural failure detected (the honest negative) |
-| `3` | one or more repair receipts fired — attention |
-| `1` | error — unreadable/invalid input **fails closed**: an unparseable run is never silently clean |
-
-`--json` prints a stable machine schema (`arl.verdict/v1`) on stdout:
-
-```json
-{
-  "schema": "arl.verdict/v1",
-  "run_id": "codex_0123…",
-  "verdict": "receipts",
-  "receipt_count": 1,
-  "max_proof_level": "L2",
-  "receipts": [ { "claim": "…", "observed_failure": "retry_loop",
-                  "proof_level": "L2", "confidence": "medium",
-                  "repair_artifact": { "…": "…" }, "limits": ["…"],
-                  "next_evidence": ["…"] } ]
-}
-```
-
-Proof levels are the L0–L6 ladder. L2 means the fix *mechanically removes the
-deterministic failure path, verifiable without a re-run* — graded by static
-inspection of a templated artifact, never by the model's self-report. Every receipt
-carries `limits` (what is NOT proven). Receipts are advisory: ARL never applies a
-patch.
-
-Every verdict — including clean — states its **detector coverage** (`coverage` in
-the JSON): what was checked and what was NOT. `clean` means "clean for the checked
-classes," never "verified correct." Run `arl selftest` once to watch a receipt fire
-through the real pipeline; after that, silence is information.
-
-### Recipes
-
-**A bash loop that stops on a dirty run (Ralph-style):**
+| `3` | receipts fired — attention |
+| `1` | unreadable input — **fails closed**: an unparseable run is never silently clean |
 
 ```bash
+# a loop that stops on a dirty run
 while :; do
   run-my-agent
-  arl verdict --latest || break   # exit 3 (receipt) or 1 (unreadable) stops the loop
+  arl verdict --latest || break      # exit 3 or 1 stops the loop
 done
 ```
 
-**A CI step (receipt as job evidence):**
-
 ```yaml
-- name: ARL verdict on the agent session
-  run: |
-    arl verdict path/to/session.jsonl --json > arl-verdict.json
-    # exit 3 fails the step when a receipt fires; artifact carries the receipt
+# a CI step — the receipt becomes job evidence
+- run: arl verdict path/to/session.jsonl --json > arl-verdict.json
   continue-on-error: true
 - uses: actions/upload-artifact@v4
   with: { name: arl-verdict, path: arl-verdict.json }
 ```
 
-**A scheduled check of your latest unattended session:**
-
-```powershell
-arl verdict --latest --json | Out-File verdict.json   # 0 clean / 3 receipts / 1 error
-```
-
-**Sweep an existing archive (months of evidence you already own):**
-
-```powershell
-arl sweep ~/.claude/projects --json    # batch-verdict every session log under a root
-arl sweep ~/.codex/sessions
-```
-
-`sweep` is read-only by default (`--save` to record), caps at `--limit 200`
-newest-first, and exits 0 (no receipts anywhere) / 3 (any file fired) / 1
-(total failure: nothing readable). Per-file errors are counted and shown, never
-silently skipped.
-
-**A Claude Code Stop hook (receipt on every finished session, zero remembered steps):**
-
-```powershell
-arl init --hooks    # installs the hook below into ./.claude/settings.json
-                    # (non-destructive merge; running it twice changes nothing)
-```
-
-```jsonc
-// what it installs — or paste it yourself:
-{
-  "hooks": {
-    "Stop": [
-      { "hooks": [ { "type": "command",
-          "command": "arl verdict --latest-claude --json >> .arl/verdicts.jsonl" } ] }
-    ]
-  }
-}
-```
-
-> Mechanics note: Claude Code hooks treat only **exit code 2** as blocking — ARL's
-> exit 3 logs the receipt but will not block the session. If you want a fired
-> receipt to BLOCK, map it in the hook command:
+> Claude Code Stop hooks treat only exit code 2 as blocking. To make a fired
+> receipt block the session:
 > `arl verdict --latest-claude --json >> .arl/verdicts.jsonl || exit 2`
-> (any non-zero ARL exit — receipt or unreadable — becomes a blocking 2).
 
-## What ARL reads today (honest scope)
+`--json` emits a stable schema (`arl.verdict/v1`) carrying the run id, detector
+version, receipts, and an explicit checked/not-checked coverage block.
 
-- **Codex CLI** session rollouts (`~/.codex/sessions/**/rollout-*.jsonl`) — live, today.
-- **Claude Code** session logs (`~/.claude/projects/**/*.jsonl`, including subagent
-  sessions) — live, today. A chat-only session with no tool calls errors honestly
-  ("no run to record") rather than grading something it cannot see.
-- **OpenAI Agents SDK** recorded trace exports (JSON) — live, today.
-- **Neutral TraceBundle JSON** (ARL's own schema) — live, today.
+## Honest scope
 
-All input is treated as hostile: size/depth-bounded parsing, typed errors, nothing
-evaluated. Trace content never leaves the machine.
+This section is the product. Read it before trusting any verdict — including ours.
 
-## V0 Scope
-
-Included: provider-neutral trace schema · local SQLite storage · JSON import/export ·
-static HTML report · run comparison · retry/cost-loop prescription with patch
-artifact · success-lie detector (R1 success claim after test deletion, R2
-completion claim with zero mutating calls; graded L0–L1, abstain-by-default) ·
-graded RepairReceipts (L0–L2 implemented honestly) · verdict mode with
-the loop exit contract · archive sweep (`arl sweep`) · OpenAI + Codex adapters
-isolated outside the core package.
-
-Not included: hosted SaaS · auth/billing · public dashboard · memory graph ·
-autonomous patch application · telemetry of any kind.
-
-## Status
-
-Early. v0.1.0, two detector classes, honest about both. The detectors and receipts
-run on real Codex and Claude Code sessions today; most well-run interactive
-sessions grade **clean**, which is the expected result — the target population is
-unattended/scheduled/CI runs, where waste hides. This project measures itself by
-one number: receipts whose fix a real person **applied** — not stars, not installs.
-If that's you, run `arl mark-applied` and open an issue; you are the metric.
+- **`clean` never means "verified correct."** It means: none of the checked
+  failure classes fired. The not-checked list prints next to every verdict.
+- **Two detector classes ship today:** `retry_loop` (graded L0–L2) and
+  `artifact_failure` (success claims with deleted tests or zero mutating calls;
+  R1/R2). Interactive, well-attended sessions mostly grade clean — the target
+  population is unattended runs.
+- **Reads today:** Claude Code session logs (incl. subagents) · Codex CLI
+  rollouts · OpenAI Agents SDK recorded traces · ARL's own neutral JSON. A
+  chat-only session errors honestly ("no run to record") instead of grading
+  something it can't see.
+- **Deliberately absent:** hosted anything, auth, telemetry of any kind,
+  auto-update (those need network calls; ARL has none, structurally),
+  autonomous patch application.
+- All input is treated as hostile: bounded parsing, typed errors, nothing
+  evaluated.
 
 ## Reporting issues & sharing receipts
 
-ARL sends nothing home — so the only way we learn it misfired (or fired well) on
-your runs is if you tell us. The good news: everything ARL emits is **content-free
-by construction** (bounded labels, booleans, hashes, counts — never your prompts,
-code, or command text; enforced by the leak-matrix tests), so the outputs below
-are safe to paste into an issue:
+ARL sends nothing home, so the only way we learn it misfired — or fired well —
+is if you tell us. Everything ARL emits is content-free by construction
+(bounded labels, booleans, hashes, counts — never your prompts, code, or
+command text), so verdict/sweep JSON is safe to paste. The
+[issue templates](.github/ISSUE_TEMPLATE) pre-fill what we need.
 
-1. `arl --version` output.
-2. The full `--json` output of the verdict or sweep in question
-   (`arl verdict ... --json`, `arl sweep ... --json`).
-3. `arl selftest` output (proves the pipeline works on your machine).
-4. OS + Python version, and which agent produced the session (Claude Code /
-   Codex CLI / Agents SDK).
+What we most want to hear, in order: a receipt that was **wrong** (false
+accusation is the worst bug this tool can have) · a failure you know happened
+that graded **clean** · a fix you actually **applied**.
 
-What we most want to hear, in order: a receipt that was WRONG (false accusation
-is the worst bug this tool can have), a failure you know happened that ARL graded
-clean (a miss — name the session shape), and a receipt whose fix you actually
-applied (the success metric). Open a GitHub issue at
-`huyn7539/agent-run-ledger`, or reply in whatever thread brought you here.
-
-Do NOT paste your raw session `.jsonl` files — they contain your actual
-prompts and tool output. If a session is needed to reproduce a parser bug,
-`arl export --run <id> --out trace.json` produces the content-free neutral form
-(the default export scrubs raw-content metadata values and patch bodies at the
-share boundary; `--raw-local` keeps full fidelity for local use only — do not
-paste that form).
+Never paste raw session `.jsonl` files — they contain your real prompts. For
+parser bugs, `arl export --run <id> --out trace.json` produces the content-free
+neutral form.
 
 ## Paid pilots & audits
 
@@ -277,25 +189,17 @@ The tool is free. If you want me in the loop, that's the paid part: I run
 sessions, graded receipts of what your agents actually did versus what they
 claimed, detectors built from your failure fixtures) and **fixed-price agent
 audits**. Everything stays local to your machines — I never need your session
-content, and the receipts you get are content-free by construction.
+content.
 
 Email **kibahung19@gmail.com**, or open an issue titled `pilot`.
 
 ## License
 
-ARL is released under the Functional Source License, v1.1, with an Apache 2.0
-future grant (`FSL-1.1-ALv2` — full text in [LICENSE](LICENSE)).
+[FSL-1.1-ALv2](LICENSE) — fair source. Free for everyone, individuals and
+companies, including all internal commercial use. The one restriction: don't
+offer ARL itself as a competing commercial product or service. Every release
+converts to plain Apache-2.0 two years after it ships, irrevocably. Same
+license family as Sentry, Codecov, and GitButler ([fsl.software](https://fsl.software/)).
 
-In plain English:
-
-- **Free for everyone** — individuals and companies alike — including all
-  internal commercial use. Run it, modify it, redistribute it.
-- **The one restriction:** you may not offer ARL itself (or a substantially
-  similar product) as a competing commercial product or service.
-- **Every release automatically becomes plain Apache-2.0 two years after it
-  ships.** The future grant is irrevocable and written into the license text.
-- The full source is here to read. The zero-egress claim is enforced by a
-  build-failing test, not a promise — audit it.
-
-This is the same license family used by Sentry, Codecov, and GitButler
-([fsl.software](https://fsl.software/)).
+The zero-egress claim is enforced by a build-failing test, not a promise —
+[audit it](tests/test_egress_guards.py).

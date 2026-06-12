@@ -15,3 +15,8 @@ build/
 # macOS
 .DS_Store
 .agentbus/*.log
+
+# internal working artifacts — never public
+.agentbus/
+docs/*.codex-draft
+docs/BUG-REPORT-fable-fallback.md

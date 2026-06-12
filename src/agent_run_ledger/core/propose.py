@@ -27,7 +27,7 @@ from agent_run_ledger.core.storage import list_runs, load_bundle
 
 PROPOSAL_DOMAIN = "arl-task60-proposal/v1"
 TEMPLATE_VERSION = "retry-budget/v1"
-PROPOSAL_CLASS = "retry_loop_budget"  # the ONE class this lane ships (wedge discipline)
+PROPOSAL_CLASS = "retry_loop_budget"  # the ONE class this lane ships — precision before breadth
 MIN_RECEIPTS = 3  # N>=3 same-shape receipts before proposing (abstain below)
 
 # Mixed case is DELIBERATE (Codex P2 review F9 rejected with justification):
