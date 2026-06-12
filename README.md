@@ -2,7 +2,8 @@
 
 <p align="center"><strong>Did your AI coding agent actually do what it claimed?</strong></p>
 
-<p align="center"><strong>graded receipts · honest abstain · exit codes for loops · 100% local · zero egress</strong></p>
+<p align="center">A local verdict layer for Claude Code, Codex CLI, and Agents SDK runs.<br>
+Graded repair receipts when a run lied. An honest abstain when it didn't.</p>
 
 <p align="center">
   <a href="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml"><img src="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -12,8 +13,8 @@
 </p>
 
 <p align="center">
-  <a href="#get-started-60-seconds">Get started</a> ·
-  <a href="#how-it-works-30-seconds">How it works</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#from-session-log-to-receipt">How it works</a> ·
   <a href="#gate-your-loop-on-it">Gate your loop</a> ·
   <a href="#honest-scope">Honest scope</a> ·
   <a href="#paid-pilots--audits">Paid pilots</a>
@@ -29,7 +30,7 @@ stated list of what is *not* proven. Every clean verdict names exactly what was
 checked. Nothing ever leaves your machine — there is no outbound network code in
 the package, and a build-failing test keeps it that way.
 
-## Get started (60 seconds)
+## Quickstart
 
 **1. Install** (Python 3.12+; no account, no config):
 
@@ -48,8 +49,9 @@ python -m agent_run_ledger --version    # always works
 ```
 </details>
 
-**2. Prove the alarm works** — selftest runs a bundled known-bad session through
-the real pipeline:
+**2. Watch a receipt fire** — selftest runs a bundled known-bad session through
+the real pipeline, so you know what the alarm sounds like before you trust the
+silence:
 
 ```text
 $ arl selftest
@@ -87,7 +89,7 @@ project measures itself by:
 arl mark-applied <run-id>
 ```
 
-## How it works (30 seconds)
+## From session log to receipt
 
 ```
  your agent's own session logs (already on disk — ARL changes nothing)
