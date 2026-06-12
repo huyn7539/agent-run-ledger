@@ -71,4 +71,6 @@ def test_malformed_settings_fails_closed(tmp_path: Path) -> None:
     r = _invoke(tmp_path)
     assert r.exit_code == 1
     assert s.read_text(encoding="utf-8") == "{not json"  # untouched
-    assert "settings.json" in r.output
+    # rich soft-wraps long paths at console width, which can split the token
+    # across a line break (CI runners have long tmp paths); de-wrap first.
+    assert "settings.json" in r.output.replace("\n", "")

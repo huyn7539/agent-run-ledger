@@ -52,7 +52,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 from uuid import uuid4
 
@@ -268,10 +268,26 @@ def _workflow(records: list[dict[str, Any]]) -> str:
     for rec in records:
         cwd = rec.get("cwd")
         if isinstance(cwd, str) and cwd:
-            name = Path(cwd).name
+            name = _dir_name(cwd)
             if name:
                 return name
     return "claude-code-session"
+
+
+def _dir_name(cwd: str) -> str:
+    """Directory name of ``cwd`` using the RECORDING machine's path flavor.
+
+    The session log's ``cwd`` was written by whatever machine recorded the
+    session; the machine parsing it may differ (a Windows-recorded archive
+    swept on Linux). ``Path`` parses with the HOST's rules — on POSIX a
+    backslash is not a separator, so ``Path("C:\\\\proj\\\\x").name`` returns the
+    whole path. Detect the flavor from the string instead: a backslash or a
+    drive-letter prefix means Windows. A POSIX directory name containing a
+    literal backslash is misread as Windows — accepted: that shape is rare,
+    and the value is a display label, never an identifier."""
+    if "\\" in cwd or (len(cwd) >= 2 and cwd[1] == ":"):
+        return PureWindowsPath(cwd).name
+    return PurePosixPath(cwd).name
 
 
 def _steps_from_records(
