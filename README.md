@@ -8,6 +8,7 @@ Graded repair receipts when a run lied. An honest abstain when it didn't.</p>
 <p align="center">
   <a href="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml"><img src="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/huyn7539/agent-run-ledger/releases"><img src="https://img.shields.io/github/v/release/huyn7539/agent-run-ledger" alt="Release"></a>
+  <a href="https://pypi.org/project/agent-run-ledger/"><img src="https://img.shields.io/pypi/v/agent-run-ledger.svg" alt="PyPI"></a>
   <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="License: FSL-1.1-ALv2"></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+">
 </p>
@@ -35,14 +36,15 @@ the package, and a build-failing test keeps it that way.
 **1. Install** (Python 3.12+; no account, no config):
 
 ```bash
-uv tool install git+https://github.com/huyn7539/agent-run-ledger
+uv tool install agent-run-ledger
 ```
 
-<details><summary>pip / pipx / from a checkout</summary>
+<details><summary>pip / pipx / from source</summary>
 
 ```bash
-pip install git+https://github.com/huyn7539/agent-run-ledger
-pipx install git+https://github.com/huyn7539/agent-run-ledger
+pip install agent-run-ledger
+pipx install agent-run-ledger
+uv tool install git+https://github.com/huyn7539/agent-run-ledger   # from source
 
 # if `arl` isn't on PATH afterwards (machines with several Pythons):
 python -m agent_run_ledger --version    # always works
