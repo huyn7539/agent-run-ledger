@@ -9,6 +9,31 @@ from agent_run_ledger.core.io import write_trace
 from agent_run_ledger.core.models import TraceValidationError
 
 
+def test_cli_report_accepts_positional_run_id(tmp_path: Path) -> None:
+    """First-user instinct is `arl report <run-id>`; both spellings must work,
+    a conflicting pair must error, and no run id must error with guidance."""
+    runner = CliRunner()
+    db = tmp_path / "ledger.sqlite"
+    runner.invoke(app, ["init", "--db", str(db)])
+    runner.invoke(app, ["run-demo", "--variant", "retry-loop", "--db", str(db)])
+
+    positional = runner.invoke(
+        app, ["report", "run_retry_loop", "--out", str(tmp_path / "a.html"), "--db", str(db)]
+    )
+    assert positional.exit_code == 0, positional.output
+    assert "wrote report" in positional.output
+
+    conflicting = runner.invoke(
+        app, ["report", "run_a", "--run", "run_b", "--db", str(db)]
+    )
+    assert conflicting.exit_code == 1
+    assert "two different run ids" in conflicting.output
+
+    neither = runner.invoke(app, ["report", "--db", str(db)])
+    assert neither.exit_code == 1
+    assert "provide a run id" in neither.output
+
+
 def test_cli_demo_report_compare(tmp_path: Path) -> None:
     runner = CliRunner()
     db = tmp_path / "ledger.sqlite"

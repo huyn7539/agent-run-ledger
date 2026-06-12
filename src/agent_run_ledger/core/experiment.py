@@ -1,7 +1,7 @@
-"""Task 60 — the governed-apply gate math. EXACT RATIONAL decision arithmetic.
+"""Governed-apply gate math. EXACT RATIONAL decision arithmetic.
 
-Design doc: Akashic 06-learning/agent-run-ledger/2026-06-11-gate-math-proposer-
-verifier-synthesis.md, as amended by the Codex spec review (determinism pinned).
+Design reviewed externally with determinism pinned (proposer/verifier synthesis,
+2026-06-11).
 
 Every DECISION quantity here is a ``fractions.Fraction`` computed from integer
 ledger counts — bit-identical across platforms, replayable forever (the same

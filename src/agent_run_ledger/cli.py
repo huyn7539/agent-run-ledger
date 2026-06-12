@@ -652,11 +652,23 @@ def auto_status_cmd(
 
 @app.command("report")
 def report(
-    run: str = typer.Option(..., "--run", help="Run id."),
+    run_id: str | None = typer.Argument(
+        None, metavar="[RUN_ID]", help="Run id (same as --run)."
+    ),
+    run: str | None = typer.Option(None, "--run", help="Run id."),
     out: Path | None = typer.Option(None, "--out", help="Output HTML path."),
     db: Path = typer.Option(default_factory=default_db, help="SQLite database path."),
 ) -> None:
     """Write a static local HTML report for a recorded run."""
+    # Both spellings accepted (first-user instinct is positional); a conflicting
+    # pair is an error, never a silent pick.
+    if run and run_id and run != run_id:
+        console.print(f"error: two different run ids given ({run_id!r} and --run {run!r})")
+        raise typer.Exit(1)
+    run = run or run_id
+    if not run:
+        console.print("error: provide a run id — `arl report <run-id>` or `arl report --run <run-id>`")
+        raise typer.Exit(1)
     bundle = _load_bundle_or_exit(db, run)
     output = out or Path(".arl") / "reports" / f"{run}.html"
     _friendly_or_exit(lambda: write_report(bundle, output))

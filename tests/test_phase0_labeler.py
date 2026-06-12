@@ -1,11 +1,10 @@
 """Phase 0 labeler v1 — regression tests for the four measurement defects found
-2026-06-11 (pre-audit, pre-extractor; see vault amendment file
-06-learning/agent-run-ledger/phase0/2026-06-11-labeler-v1-amendment.md).
+2026-06-11 (pre-audit, pre-extractor).
 
 Defects pinned here:
   D1 cross-repo misattribution — edits joined against session cwd repo, not the
-     repo the edited file lives in (card 1: ARL files committed at 9dc4f75 read
-     as UNCOMMITTED against Akashic).
+     repo the edited file lives in (card 1: files committed at 9dc4f75 in one
+     repo read as UNCOMMITTED against a different repo the session ran from).
   D2 gitignored files counted as UNCOMMITTED evidence (.env.*, settings.local).
   D3 out-of-repo files (e.g. ~/.claude memory dir) counted as UNCOMMITTED.
   D4 single-probe brittleness — one longest line amended pre-commit flipped a

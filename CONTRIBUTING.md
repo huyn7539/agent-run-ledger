@@ -37,10 +37,13 @@ contribution is clarity, not size.
 ```bash
 git clone https://github.com/huyn7539/agent-run-ledger
 cd agent-run-ledger
-uv sync --extra dev
-uv run pytest        # full suite; ~30s
-uv run arl selftest  # end-to-end pipeline check
+uv sync --all-extras   # dev tools + the optional OpenAI Agents SDK
+uv run pytest          # full suite; ~30s
+uv run arl selftest    # end-to-end pipeline check
 ```
+
+Note: with `--extra dev` alone, three live-capture gate tests skip (they need the
+optional `openai` extra). `--all-extras` runs the complete suite.
 
 ## License terms for contributions
 
