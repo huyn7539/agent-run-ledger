@@ -276,3 +276,22 @@ paste that form).
 
 An activated install means a builder produces at least one verdict or trace report
 on their own machine. Package downloads, stars, and README views do not count.
+
+## License
+
+ARL is released under the Functional Source License, v1.1, with an Apache 2.0
+future grant (`FSL-1.1-ALv2` — full text in [LICENSE](LICENSE)).
+
+In plain English:
+
+- **Free for everyone** — individuals and companies alike — including all
+  internal commercial use. Run it, modify it, redistribute it.
+- **The one restriction:** you may not offer ARL itself (or a substantially
+  similar product) as a competing commercial product or service.
+- **Every release automatically becomes plain Apache-2.0 two years after it
+  ships.** The future grant is irrevocable and written into the license text.
+- The full source is here to read. The zero-egress claim is enforced by a
+  build-failing test, not a promise — audit it.
+
+This is the same license family used by Sentry, Codecov, and GitButler
+([fsl.software](https://fsl.software/)).

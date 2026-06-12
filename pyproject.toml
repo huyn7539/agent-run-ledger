@@ -3,7 +3,7 @@ name = "agent-run-ledger"
 version = "0.1.0"
 description = "Local-first verdict layer for AI coding-agent runs: graded repair receipts and a loop-gating exit code. No outbound network code; optional dashboard binds 127.0.0.1 only."
 readme = "README.md"
-license = "Apache-2.0"
+license = "FSL-1.1-ALv2"
 license-files = ["LICENSE"]
 authors = [{ name = "Hung Huynh" }]
 keywords = ["ai-agents", "claude-code", "codex", "verdict", "receipts", "local-first"]
