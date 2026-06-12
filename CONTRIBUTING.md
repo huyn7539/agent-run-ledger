@@ -44,7 +44,7 @@ uv run arl selftest  # end-to-end pipeline check
 
 ## License terms for contributions
 
-This project is licensed under FSL-1.1-ALv2 (see [LICENSE](LICENSE) and the
+This project is licensed under FSL-1.1-ALv2 (see [LICENSE.md](LICENSE.md) and the
 plain-English summary in the README).
 
 By submitting a contribution you agree that:

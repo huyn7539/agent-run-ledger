@@ -8,7 +8,7 @@ Graded repair receipts when a run lied. An honest abstain when it didn't.</p>
 <p align="center">
   <a href="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml"><img src="https://github.com/huyn7539/agent-run-ledger/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/huyn7539/agent-run-ledger/releases"><img src="https://img.shields.io/github/v/release/huyn7539/agent-run-ledger" alt="Release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="License: FSL-1.1-ALv2"></a>
+  <a href="LICENSE.md"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue.svg" alt="License: FSL-1.1-ALv2"></a>
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python 3.12+">
 </p>
 
@@ -197,7 +197,7 @@ Email **kibahung19@gmail.com**, or open an issue titled `pilot`.
 
 ## License
 
-[FSL-1.1-ALv2](LICENSE) — fair source. Free for everyone, individuals and
+[FSL-1.1-ALv2](LICENSE.md) — fair source. Free for everyone, individuals and
 companies, including all internal commercial use. The one restriction: don't
 offer ARL itself as a competing commercial product or service. Every release
 converts to plain Apache-2.0 two years after it ships, irrevocably. Same
