@@ -788,6 +788,9 @@ DETECTOR_COVERAGE = {
         "(R1 test-deletion, R2 no-op completion), graded L0-L1",
     ],
     "not_checked": [
+        "variation loops (same goal retried with DIFFERENT input bytes — "
+        "rephrased prompts, regenerated payloads)",
+        "dispatch/respawn loops (stop-then-relaunch of the same task/workflow)",
         "specification failure (agent built the wrong thing)",
         "wrong-but-passing patch beyond R1/R2 (e.g. assertion weakening, "
         "'tests pass' claim with no test run after the last edit)",
@@ -897,7 +900,8 @@ def verdict(
             f"in {bundle.run.id}"
         )
         console.print(
-            "  checked: retry loops · success-claim/log divergence (detector v1)"
+            "  checked: mechanical retry loops (identical re-attempts) · "
+            "success-claim/log divergence (detector v1)"
         )
         console.print(
             "  NOT checked: spec failures, wrong-but-green patches beyond R1/R2, "

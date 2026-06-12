@@ -160,6 +160,12 @@ This section is the product. Read it before trusting any verdict — including o
   `artifact_failure` (success claims with deleted tests or zero mutating calls;
   R1/R2). Interactive, well-attended sessions mostly grade clean — the target
   population is unattended runs.
+- **`retry_loop` means *mechanical* loops: identical re-attempts of one call.**
+  Variation loops (the same goal retried with rephrased prompts or regenerated
+  payloads) and dispatch loops (a task stopped and relaunched) are real, common,
+  and **not yet detected** — they grade clean today. Detectors for those classes
+  ship only after their precision is measured on real fixtures; if you have such
+  a session, that fixture is the most valuable thing you can send us.
 - **Reads today:** Claude Code session logs (incl. subagents) · Codex CLI
   rollouts · OpenAI Agents SDK recorded traces · ARL's own neutral JSON. A
   chat-only session errors honestly ("no run to record") instead of grading

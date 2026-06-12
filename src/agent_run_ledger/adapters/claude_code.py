@@ -542,9 +542,25 @@ def _tool_result_ids(rec: dict[str, Any]) -> set[str]:
     return ids
 
 
+# Harness-injected user-role records carry NO distinguishing metadata (measured
+# on the 2026-06-12 fleet-respawn specimen: its task-notification has no isMeta)
+# — only their text shape identifies them. A real human does not type these
+# markers; misreading them as instructions bumps the segment and partitions the
+# retry scope, structurally hiding every autonomous loop that spans a wake-up —
+# the exact population the detector targets.
+_HARNESS_INJECTED_PREFIXES = (
+    "<task-notification>",
+    "[SYSTEM NOTIFICATION",
+    "<system-reminder>",
+    "<command-name>",
+    "<local-command-stdout>",
+)
+
+
 def _is_human_instruction(rec: dict[str, Any]) -> bool:
     """True for a REAL user instruction (string content or a ``text`` block),
-    never for tool-result carriers or meta/system-injected lines."""
+    never for tool-result carriers, meta lines, or harness-injected records
+    (task notifications / system reminders / command echoes)."""
     if rec.get("isMeta"):
         return False
     message = rec.get("message")
@@ -552,10 +568,17 @@ def _is_human_instruction(rec: dict[str, Any]) -> bool:
         return False
     content = message.get("content")
     if isinstance(content, str):
-        return bool(content.strip())
-    if isinstance(content, list):
-        return any(isinstance(b, dict) and b.get("type") == "text" for b in content)
-    return False
+        text = content
+    elif isinstance(content, list):
+        if not any(isinstance(b, dict) and b.get("type") == "text" for b in content):
+            return False
+        text = _human_text(rec)
+    else:
+        return False
+    stripped = text.lstrip()
+    if not stripped:
+        return False
+    return not stripped.startswith(_HARNESS_INJECTED_PREFIXES)
 
 
 def _results_by_tool_use_id(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

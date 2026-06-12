@@ -96,6 +96,50 @@ def test_clean_session_emits_no_prescriptions() -> None:
     assert analyze_bundle(bundle) == []
 
 
+def test_harness_notification_between_repeats_does_not_split_scope() -> None:
+    """RED-FIRST from the 2026-06-12 fleet-respawn specimen: harness-injected
+    records (task notifications, system reminders) arrive as user-role TEXT
+    records with no isMeta flag. They are wake-ups, not human direction — they
+    must NOT bump the segment, or every autonomous loop spanning a notification
+    is structurally invisible (the exact population the detector targets)."""
+    lines = [json.loads(ln) for ln in (FIXTURES / "retry_session.jsonl").read_text().splitlines()]
+    notification = {
+        "parentUuid": "x",
+        "isSidechain": False,
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [{"type": "text", "text": (
+                "<task-notification>\n<task-id>abc123</task-id>\n"
+                "<status>completed</status>\n</task-notification>"
+            )}],
+        },
+        "uuid": "n-extra",
+        "timestamp": "2026-06-10T01:00:22.000Z",
+        "cwd": "C:\\proj\\sample",
+        "sessionId": "f00dfeed-0000-4000-8000-000000000001",
+        "version": "2.1.170",
+        "gitBranch": "main",
+    }
+    reminder = dict(
+        notification,
+        uuid="n-extra2",
+        message={"role": "user", "content": [{"type": "text", "text": (
+            "[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated event."
+        )}]},
+    )
+    with_noise = (
+        lines[:3] + [notification] + lines[3:5] + [reminder] + lines[5:]
+    )
+    bundle = bundle_from_session(with_noise)
+    scopes = {s.retry_scope for s in bundle.steps}
+    assert len(scopes) == 1, "harness wake-ups must not partition the retry scope"
+    assert analyze_bundle(bundle), (
+        "3 identical failing autonomous attempts must STILL fire with "
+        "notifications interleaved — this is the fleet-respawn lesson"
+    )
+
+
 def test_user_instruction_between_repeats_blocks_false_retry() -> None:
     """A human instruction between identical failing calls = a DIRECTED rerun,
     not an autonomous loop — the segment boundary must prevent collapse."""
